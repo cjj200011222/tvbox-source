@@ -85,7 +85,6 @@ var rule = {
         try {
             var m = String(input).match(/(\d+)\s*$/);
             var epId = m ? parseInt(m[1]) : null;
-            log('xfan lazy: epId=' + epId + ' input=' + input);
             var playApi = 'https://rzmsnqblptbceicadbyd.supabase.co/functions/v1/issue-web-playback';
             var playHeaders = {
                 'apikey': 'sb_publishable_aCb7uwyLN6H-sMjze4dRGA_2MDuROLF',
@@ -98,7 +97,6 @@ var rule = {
             var playBody = { action: 'hls', episode_id: epId };
             // 单独放宽超时：该接口冷启动可能要 5 秒以上（引擎默认 5 秒会超时）
             var res = post(playApi, { headers: playHeaders, body: playBody, timeout: 30000 });
-            log('xfan lazy: res=' + (typeof res === 'string' ? res.substring(0, 200) : String(res)));
             var data = null;
             try {
                 data = typeof res === 'string' ? JSON.parse(res) : res;
@@ -106,16 +104,31 @@ var rule = {
                 data = null;
             }
             if (data && data.url) {
+                var m3u8Url = data.url;
+                // 主m3u8是master playlist(多码率嵌套子playlist)，部分手机端播放器不自动跟进子playlist
+                // 这里取出第一个子media playlist的url直接返回，跳过master层，提升手机端兼容性
+                try {
+                    var m3u8Res = fetch(m3u8Url, { headers: { 'User-Agent': 'MOBILE_UA' }, timeout: 15000 });
+                    if (m3u8Res && m3u8Res.indexOf('#EXT-X-STREAM-INF') > -1) {
+                        var lines = m3u8Res.split('\n');
+                        for (var k = 0; k < lines.length; k++) {
+                            var line = lines[k].trim();
+                            if (line && line.indexOf('http') === 0 && line.indexOf('.m3u8') > -1) {
+                                m3u8Url = line;
+                                break;
+                            }
+                        }
+                    }
+                } catch (e) {}
                 input = {
                     parse: 0,
-                    url: data.url,
+                    url: m3u8Url,
                     js: ''
                 };
             } else {
                 input = { parse: 0, url: '', js: '' };
             }
         } catch (e) {
-            // 出错时把错误塞进 url，方便手机端看到报错原因
             input = { parse: 0, url: 'xfan_err:' + e.message, js: '' };
         }
     }),

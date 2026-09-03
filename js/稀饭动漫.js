@@ -81,12 +81,10 @@ var rule = {
     filter_def: "",
     play_parse: true,
     lazy: $js.toString(() => {
-        // 诊断版：把执行进度拼进url，newbox播放失败时显示url能看到卡在哪步
-        var dbg = 'step0';
+        // id 形如 http://xf/ep/37416（伪URL前缀防止引擎把纯数字当base64解码成乱码）
         try {
             var m = String(input).match(/(\d+)\s*$/);
             var epId = m ? parseInt(m[1]) : null;
-            dbg += '|epId=' + epId;
             var playApi = 'https://rzmsnqblptbceicadbyd.supabase.co/functions/v1/issue-web-playback';
             var playHeaders = {
                 'apikey': 'sb_publishable_aCb7uwyLN6H-sMjze4dRGA_2MDuROLF',
@@ -96,24 +94,24 @@ var rule = {
                 'Referer': 'https://next.xifanacg.com/'
             };
             var playBody = JSON.stringify({ action: 'hls', episode_id: epId });
-            dbg += '|beforePost';
             var res = post(playApi, { headers: playHeaders, body: playBody, timeout: 15000 });
-            dbg += '|afterPost:type=' + typeof res + '|len=' + (res ? (typeof res === 'string' ? res.length : Object.keys(res).length) : 0);
             var data = null;
             try {
                 data = typeof res === 'string' ? JSON.parse(res) : res;
-                dbg += '|parsed:ok=' + (data && data.ok) + '|hasUrl=' + !!(data && data.url);
             } catch (e) {
-                dbg += '|parseErr:' + e.message;
+                data = null;
             }
             if (data && data.url) {
-                // 返回诊断信息+真实url（播放器会尝试播真实url，失败时能看到诊断前缀）
                 input = { parse: 0, url: data.url, js: '' };
+            } else if (data && data.error) {
+                // 透传后端错误：hls_not_ready=资源未就绪(新番常見,站方还没转码完)
+                var errMsg = data.error === 'hls_not_ready' ? '资源未就绪(站方尚未转码,换别的番或稍后再试)' : data.error;
+                input = { parse: 0, url: 'xfan:' + errMsg, js: '' };
             } else {
-                input = { parse: 0, url: 'xfan_dbg:' + dbg, js: '' };
+                input = { parse: 0, url: '', js: '' };
             }
         } catch (e) {
-            input = { parse: 0, url: 'xfan_err:' + dbg + '|' + e.message, js: '' };
+            input = { parse: 0, url: 'xfan:' + e.message, js: '' };
         }
     }),
     推荐: $js.toString(() => {

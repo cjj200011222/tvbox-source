@@ -82,33 +82,41 @@ var rule = {
     play_parse: true,
     lazy: $js.toString(() => {
         // id 形如 http://xf/ep/37416（伪URL前缀防止引擎把纯数字当base64解码成乱码）
-        var m = String(input).match(/(\d+)\s*$/);
-        var epId = m ? parseInt(m[1]) : null;
-        var playApi = 'https://rzmsnqblptbceicadbyd.supabase.co/functions/v1/issue-web-playback';
-        var playHeaders = {
-            'apikey': 'sb_publishable_aCb7uwyLN6H-sMjze4dRGA_2MDuROLF',
-            'Authorization': 'Bearer sb_publishable_aCb7uwyLN6H-sMjze4dRGA_2MDuROLF',
-            'Content-Type': 'application/json',
-            'Origin': 'https://next.xifanacg.com',
-            'Referer': 'https://next.xifanacg.com/'
-        };
-        var playBody = JSON.stringify({ action: 'hls', episode_id: epId });
-        // 单独放宽超时：该接口冷启动可能要 5 秒以上（引擎默认 5 秒会超时）
-        var res = post(playApi, { headers: playHeaders, body: playBody, timeout: 30000 });
-        var data = null;
         try {
-            data = JSON.parse(res);
-        } catch (e) {
-            data = null;
-        }
-        if (data && data.url) {
-            input = {
-                parse: 0,
-                url: data.url,
-                js: ''
+            var m = String(input).match(/(\d+)\s*$/);
+            var epId = m ? parseInt(m[1]) : null;
+            log('xfan lazy: epId=' + epId + ' input=' + input);
+            var playApi = 'https://rzmsnqblptbceicadbyd.supabase.co/functions/v1/issue-web-playback';
+            var playHeaders = {
+                'apikey': 'sb_publishable_aCb7uwyLN6H-sMjze4dRGA_2MDuROLF',
+                'Authorization': 'Bearer sb_publishable_aCb7uwyLN6H-sMjze4dRGA_2MDuROLF',
+                'Content-Type': 'application/json',
+                'Origin': 'https://next.xifanacg.com',
+                'Referer': 'https://next.xifanacg.com/'
             };
-        } else {
-            input = { parse: 0, url: '', js: '' };
+            // body 用 object 传：手机端 req 会转成 data 字段，比 JSON 字符串更兼容
+            var playBody = { action: 'hls', episode_id: epId };
+            // 单独放宽超时：该接口冷启动可能要 5 秒以上（引擎默认 5 秒会超时）
+            var res = post(playApi, { headers: playHeaders, body: playBody, timeout: 30000 });
+            log('xfan lazy: res=' + (typeof res === 'string' ? res.substring(0, 200) : String(res)));
+            var data = null;
+            try {
+                data = typeof res === 'string' ? JSON.parse(res) : res;
+            } catch (e) {
+                data = null;
+            }
+            if (data && data.url) {
+                input = {
+                    parse: 0,
+                    url: data.url,
+                    js: ''
+                };
+            } else {
+                input = { parse: 0, url: '', js: '' };
+            }
+        } catch (e) {
+            // 出错时把错误塞进 url，方便手机端看到报错原因
+            input = { parse: 0, url: 'xfan_err:' + e.message, js: '' };
         }
     }),
     推荐: $js.toString(() => {

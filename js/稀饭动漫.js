@@ -93,10 +93,10 @@ var rule = {
                 'Origin': 'https://next.xifanacg.com',
                 'Referer': 'https://next.xifanacg.com/'
             };
-            // body 用 object 传：手机端 req 会转成 data 字段，比 JSON 字符串更兼容
-            var playBody = { action: 'hls', episode_id: epId };
+            // body 用 JSON 字符串传（各端 req 都支持字符串 body；object 转 data 在部分端会卡死）
+            var playBody = JSON.stringify({ action: 'hls', episode_id: epId });
             // 单独放宽超时：该接口冷启动可能要 5 秒以上（引擎默认 5 秒会超时）
-            var res = post(playApi, { headers: playHeaders, body: playBody, timeout: 30000 });
+            var res = post(playApi, { headers: playHeaders, body: playBody, timeout: 15000 });
             var data = null;
             try {
                 data = typeof res === 'string' ? JSON.parse(res) : res;

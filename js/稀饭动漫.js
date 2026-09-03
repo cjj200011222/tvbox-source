@@ -81,10 +81,12 @@ var rule = {
     filter_def: "",
     play_parse: true,
     lazy: $js.toString(() => {
-        // id 形如 http://xf/ep/37416（伪URL前缀防止引擎把纯数字当base64解码成乱码）
+        // 诊断版：把执行进度拼进url，newbox播放失败时显示url能看到卡在哪步
+        var dbg = 'step0';
         try {
             var m = String(input).match(/(\d+)\s*$/);
             var epId = m ? parseInt(m[1]) : null;
+            dbg += '|epId=' + epId;
             var playApi = 'https://rzmsnqblptbceicadbyd.supabase.co/functions/v1/issue-web-playback';
             var playHeaders = {
                 'apikey': 'sb_publishable_aCb7uwyLN6H-sMjze4dRGA_2MDuROLF',
@@ -93,43 +95,25 @@ var rule = {
                 'Origin': 'https://next.xifanacg.com',
                 'Referer': 'https://next.xifanacg.com/'
             };
-            // body 用 JSON 字符串传（各端 req 都支持字符串 body；object 转 data 在部分端会卡死）
             var playBody = JSON.stringify({ action: 'hls', episode_id: epId });
-            // 单独放宽超时：该接口冷启动可能要 5 秒以上（引擎默认 5 秒会超时）
+            dbg += '|beforePost';
             var res = post(playApi, { headers: playHeaders, body: playBody, timeout: 15000 });
+            dbg += '|afterPost:type=' + typeof res + '|len=' + (res ? (typeof res === 'string' ? res.length : Object.keys(res).length) : 0);
             var data = null;
             try {
                 data = typeof res === 'string' ? JSON.parse(res) : res;
+                dbg += '|parsed:ok=' + (data && data.ok) + '|hasUrl=' + !!(data && data.url);
             } catch (e) {
-                data = null;
+                dbg += '|parseErr:' + e.message;
             }
             if (data && data.url) {
-                var m3u8Url = data.url;
-                // 主m3u8是master playlist(多码率嵌套子playlist)，部分手机端播放器不自动跟进子playlist
-                // 这里取出第一个子media playlist的url直接返回，跳过master层，提升手机端兼容性
-                try {
-                    var m3u8Res = fetch(m3u8Url, { headers: { 'User-Agent': 'MOBILE_UA' }, timeout: 15000 });
-                    if (m3u8Res && m3u8Res.indexOf('#EXT-X-STREAM-INF') > -1) {
-                        var lines = m3u8Res.split('\n');
-                        for (var k = 0; k < lines.length; k++) {
-                            var line = lines[k].trim();
-                            if (line && line.indexOf('http') === 0 && line.indexOf('.m3u8') > -1) {
-                                m3u8Url = line;
-                                break;
-                            }
-                        }
-                    }
-                } catch (e) {}
-                input = {
-                    parse: 0,
-                    url: m3u8Url,
-                    js: ''
-                };
+                // 返回诊断信息+真实url（播放器会尝试播真实url，失败时能看到诊断前缀）
+                input = { parse: 0, url: data.url, js: '' };
             } else {
-                input = { parse: 0, url: '', js: '' };
+                input = { parse: 0, url: 'xfan_dbg:' + dbg, js: '' };
             }
         } catch (e) {
-            input = { parse: 0, url: 'xfan_err:' + e.message, js: '' };
+            input = { parse: 0, url: 'xfan_err:' + dbg + '|' + e.message, js: '' };
         }
     }),
     推荐: $js.toString(() => {

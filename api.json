@@ -961,6 +961,15 @@
             "quickSearch": 1
         },
         {
+            "key": "樱之空动漫",
+            "name": "樱之空 • 动漫",
+            "type": 3,
+            "api": "./js/drpy2.min.js",
+            "ext": "./js/樱之空动漫.js",
+            "searchable": 1,
+            "quickSearch": 1
+        },
+        {
             "key": "荐片",
             "name": "荐片 • 磁力",
             "api": "csp_JianPian",

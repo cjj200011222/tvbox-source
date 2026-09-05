@@ -949,7 +949,10 @@
       "name": "去看吧 • 动漫",
       "type": 3,
       "api": "./js/drpy2.min.js",
-      "ext": "./js/去看吧.js"
+      "ext": "./js/去看吧动漫.js",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 1
     },
     {
       "key": "稀饭动漫",
@@ -1562,6 +1565,16 @@
       "searchable": 0,
       "filterable": 0,
       "changeable": 0
+    },
+    {
+      "key": "555电影",
+      "name": "555 • 电影",
+      "type": 3,
+      "api": "./js/drpy2.min.js",
+      "ext": "./js/555电影.js",
+      "searchable": 0,
+      "quickSearch": 0,
+      "filterable": 1
     }
   ],
   "lives": [

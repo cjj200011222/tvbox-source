@@ -979,6 +979,15 @@
       "quickSearch": 1
     },
     {
+      "key": "次元城动画",
+      "name": "次元城 • 动漫",
+      "type": 3,
+      "api": "./js/drpy2.min.js",
+      "ext": "./js/次元城动画.js",
+      "searchable": 1,
+      "quickSearch": 1
+    },
+    {
       "key": "荐片",
       "name": "荐片 • 磁力",
       "api": "csp_JianPian",

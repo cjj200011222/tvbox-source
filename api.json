@@ -5,6 +5,110 @@
   "danmaku": "http://127.0.0.1:9978/proxy?do=danmaku&name={name}&episode={episode}",
   "sites": [
     {
+      "key": "555电影",
+      "name": "555 • 自制",
+      "type": 3,
+      "api": "./js/drpy2.min.js",
+      "ext": "./js/555电影.js",
+      "searchable": 0,
+      "quickSearch": 0,
+      "filterable": 1
+    },
+    {
+      "key": "247看",
+      "name": "247 • 自制",
+      "type": 3,
+      "api": "./js/drpy2.min.js",
+      "ext": "./js/247看.js",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 1
+    },
+    {
+      "key": "飞快TV",
+      "name": "飞快 • 自制",
+      "type": 3,
+      "api": "./js/drpy2.min.js",
+      "ext": "./js/飞快TV.js",
+      "searchable": 1,
+      "quickSearch": 1
+    },
+    {
+      "key": "去看吧",
+      "name": "去看吧 • 自制",
+      "type": 3,
+      "api": "./js/drpy2.min.js",
+      "ext": "./js/去看吧动漫.js",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 1
+    },
+    {
+      "key": "稀饭动漫",
+      "name": "稀饭 • 自制",
+      "type": 3,
+      "api": "./js/drpy2.min.js",
+      "ext": "./js/稀饭动漫.js",
+      "searchable": 1,
+      "quickSearch": 1
+    },
+    {
+      "key": "樱之空动漫",
+      "name": "樱之空 • 自制",
+      "type": 3,
+      "api": "./js/drpy2.min.js",
+      "ext": "./js/樱之空动漫.js",
+      "searchable": 1,
+      "quickSearch": 1
+    },
+    {
+      "key": "哔咪动漫",
+      "name": "哔咪 • 自制",
+      "type": 3,
+      "api": "./js/drpy2.min.js",
+      "ext": "./js/哔咪动漫.js",
+      "searchable": 1,
+      "quickSearch": 1
+    },
+    {
+      "key": "次元城动画",
+      "name": "次元城 • 自制",
+      "type": 3,
+      "api": "./js/drpy2.min.js",
+      "ext": "./js/次元城动画.js",
+      "searchable": 1,
+      "quickSearch": 1
+    },
+    {
+      "key": "E-ACG动漫",
+      "name": "E-ACG • 自制",
+      "type": 3,
+      "api": "./js/drpy2.min.js",
+      "ext": "./js/E-ACG动漫.js",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 1
+    },
+    {
+      "key": "咕咕番",
+      "name": "咕咕 • 自制",
+      "type": 3,
+      "api": "./js/drpy2.min.js",
+      "ext": "./js/咕咕番.js",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 1
+    },
+    {
+      "key": "网盘搜索",
+      "name": "网盘 • 自制",
+      "type": 3,
+      "api": "./js/drpy2.min.js",
+      "ext": "./js/网盘搜索.js",
+      "searchable": 1,
+      "quickSearch": 1
+    },
+    {
       "key": "豆瓣",
       "name": "豆瓣 • 首页",
       "type": 3,
@@ -773,16 +877,6 @@
       "filterable": 0
     },
     {
-      "key": "555电影",
-      "name": "555 • 电影",
-      "type": 3,
-      "api": "./js/drpy2.min.js",
-      "ext": "./js/555电影.js",
-      "searchable": 0,
-      "quickSearch": 0,
-      "filterable": 1
-    },
-    {
       "key": "番社动漫",
       "name": "番社 • 动漫",
       "type": 3,
@@ -912,100 +1006,6 @@
       "type": 3,
       "api": "./js/drpy2.min.js",
       "ext": "./js/路漫漫.js"
-    },
-    {
-      "key": "去看吧",
-      "name": "去看吧 • 动漫",
-      "type": 3,
-      "api": "./js/drpy2.min.js",
-      "ext": "./js/去看吧动漫.js",
-      "searchable": 1,
-      "quickSearch": 1,
-      "filterable": 1
-    },
-    {
-      "key": "稀饭动漫",
-      "name": "稀饭 • 动漫",
-      "type": 3,
-      "api": "./js/drpy2.min.js",
-      "ext": "./js/稀饭动漫.js",
-      "searchable": 1,
-      "quickSearch": 1
-    },
-    {
-      "key": "樱之空动漫",
-      "name": "樱之空 • 动漫",
-      "type": 3,
-      "api": "./js/drpy2.min.js",
-      "ext": "./js/樱之空动漫.js",
-      "searchable": 1,
-      "quickSearch": 1
-    },
-    {
-      "key": "哔咪动漫",
-      "name": "哔咪 • 动漫",
-      "type": 3,
-      "api": "./js/drpy2.min.js",
-      "ext": "./js/哔咪动漫.js",
-      "searchable": 1,
-      "quickSearch": 1
-    },
-    {
-      "key": "次元城动画",
-      "name": "次元城 • 动漫",
-      "type": 3,
-      "api": "./js/drpy2.min.js",
-      "ext": "./js/次元城动画.js",
-      "searchable": 1,
-      "quickSearch": 1
-    },
-    {
-      "key": "247看",
-      "name": "247 • 影视",
-      "type": 3,
-      "api": "./js/drpy2.min.js",
-      "ext": "./js/247看.js",
-      "searchable": 1,
-      "quickSearch": 1,
-      "filterable": 1
-    },
-    {
-      "key": "飞快TV",
-      "name": "飞快 • 影视",
-      "type": 3,
-      "api": "./js/drpy2.min.js",
-      "ext": "./js/飞快TV.js",
-      "searchable": 1,
-      "quickSearch": 1
-    },
-    {
-      "key": "E-ACG动漫",
-      "name": "E-ACG • 动漫",
-      "type": 3,
-      "api": "./js/drpy2.min.js",
-      "ext": "./js/E-ACG动漫.js",
-      "searchable": 1,
-      "quickSearch": 1,
-      "filterable": 1
-    },
-    {
-      "key": "咕咕番",
-      "name": "咕咕 • 番剧",
-      "type": 3,
-      "api": "./js/drpy2.min.js",
-      "ext": "./js/咕咕番.js",
-      "searchable": 1,
-      "quickSearch": 1,
-      "filterable": 1
-    },
-    {
-      "key": "网盘搜索",
-      "name": "网盘 • 搜索",
-      "type": 3,
-      "api": "./js/drpy2.min.js",
-      "ext": "./js/网盘搜索.js",
-      "searchable": 1,
-      "quickSearch": 1
     },
     {
       "key": "荐片",

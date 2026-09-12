@@ -15,11 +15,19 @@
  *   那是另一个量级的工程，不在本源范围内。
  *
  * 接口速查（PanSou）：
- *   - 搜索：GET {api}/api/search?kw={关键词}
- *       ⚠️ 不要加 res=all —— 那会返回 results 全量明细，实测 30s+ 超时不可用；
- *          默认（不带 res）只返回 merged_by_type，实测约 4.8s，端上可用
- *   - 可选参数：src=all|tg|plugin（来源筛选）、cloud_types=quark,baidu（网盘类型筛选）
- *   - 其它接口：GET /api/health（健康检查）、POST /api/check/links（链接有效性检测）
+ *   - 搜索：GET {api}/api/search?kw={关键词}[&channels=频道1,频道2]
+ *       ⚠️ 不要加 res=all —— 那会返回 results 全量明细，实测 30s+ 超时不可用
+ *   - 其它可选参数：src=all|tg|plugin（来源筛选）、cloud_types=quark,baidu、conc（并发数）
+ *   - 健康检查：GET /api/health（返回该实例启用的 plugins 与 channels 列表）
+ *
+ * ⚠️ 公共实例的可靠性（2026-09-12 实测 —— 这是本源"一直转圈然后失败"的根源）：
+ *   - 成功率只有 6~7 成：随机返回 400/403/429/502，或直接挂起 25s+ 不响应
+ *   - 失败大多是 0.3~0.5s 的**快速失败**，所以「多次快速重试」远优于「一次长等」
+ *   - 全量源平均 4.5~6s（PanSou 服务端 ASYNC_RESPONSE_TIMEOUT 默认 4s，到点先返回已有的）
+ *   - 用 channels 限定 TG 频道可大幅提速：15 个精选频道 0.9s/37 条，
+ *     比全量源的 4.5s/14 条又快又多（并发上限 conc 默认 10，60 个频道排队，
+ *     4s 窗口里只搜得完一小部分）
+ *   - 故本源策略固定为：短超时 + 总时间预算 + 多实例/多策略回退 + 结果缓存
  *
  * merged_by_type 条目结构（实测）：
  *   { url, password, note, datetime, source, images? }
@@ -27,8 +35,9 @@
  *        "source":"plugin:wanou","images":["https://img9.doubanio.com/...jpg"]}
  *
  * 关键实测结论：
- *   - **默认模式响应约 4.8s**（PanSou 服务端 ASYNC_RESPONSE_TIMEOUT 默认 4s，
- *     到点先返回已有的），已超引擎默认 5s，故所有 fetch 必须显式带 timeout
+ *   - **默认模式响应约 4.5~6s**（PanSou 服务端 ASYNC_RESPONSE_TIMEOUT 默认 4s，
+ *     到点先返回已有的），已超引擎默认 5s（drpy2: rule.timeout || 5e3），
+ *     故所有 fetch 必须显式带 timeout
  *   - **条目自带封面** images[]（豆瓣/腾讯/TG CDN），豆瓣图**直连即 200**（免 referer），
  *     无需代理；wsrv.nl 反而 404 不可用
  *   - **同一资源会横跨多个网盘类型**（同一插件的 note 完全相同）→ 本源按 note 精确合并，
@@ -50,15 +59,24 @@ var rule = {
     headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
     },
-    timeout: 20000,
+    timeout: 10000,
     // 一级 = 热门搜索词入口（PanSou 没有分类/榜单接口，只能靠预设词给出可点内容）
     class_name: '庆余年&繁花&狂飙&三体&甄嬛传&漫威&动漫&综艺&纪录片&4K&蓝光&合集',
     class_url: '1&2&3&4&5&6&7&8&9&10&11&12',
     play_parse: true,
     play_json: [],
     推荐: $js.toString(() => {
-        // 首页推荐：用「全集」这类网盘搜索高频词打底，展示真实资源（单次请求约 5s）
-        VODS = rule.wpSearch('全集', 24);
+        // 首页：命中量大的热词打底；失败或空就在总预算内换词，绝不长时间挂起
+        var kws = rule.wpHomeKw || ['全集', '合集', '动漫'];
+        var t0 = rule.wpNow();
+        var out = [];
+        for (var i = 0; i < kws.length; i++) {
+            var left = rule.wpHomeBudget - (rule.wpNow() - t0);
+            if (left < 1200) { break; }
+            out = rule.wpSearch(kws[i], 24, left);
+            if (out && out.length) { break; }
+        }
+        VODS = out;
     }),
     一级: $js.toString(() => {
         // MY_CATE 是 class_url 的下标（1 起），映射回热词
@@ -146,8 +164,33 @@ var rule = {
 
 /* ============================ 配置区（挂 rule，函数体内可见） ============================ */
 
-// PanSou 实例地址：自建后改这里（如 http://192.168.1.10:8888）
-rule.wpApi = 'https://so.252035.xyz';
+/* ---- 实例与容错（改动这里就够了）---- */
+
+// PanSou 实例地址列表，按顺序回退。自建后把自建地址放第一个（如 http://192.168.1.10:8888）
+// 公共实例实测成功率仅 6~7 成，多备一两个实例是性价比最高的优化
+rule.wpApiList = ['https://so.252035.xyz', 'https://pansou.app'];
+// 兼容旧写法：单实例地址（= 列表首个）
+rule.wpApi = rule.wpApiList[0];
+
+// 精选 TG 频道（逗号分隔）。原理：PanSou 并发上限 conc 默认 10，60 个频道要排队，
+// 服务端 4s 一到就先返回已有结果 —— 限定频道反而能在窗口内搜完，又快又多
+// （实测 15 个精选频道 0.9s/37 条，全量源 4.5s/14 条）
+// 填空字符串即关闭此优化（走全量源）。频道名随实例而变，可用 /api/health 查看
+rule.wpChannels = 'tgsearchers4,Aliyun_4K_Movies,yunpanx,PanjClub,MCPH01,MCPH02,MCPH03,shareAliyun,alyp_1,Quark_Movies,ucquark,tyypzhpd,yydf_hzl,leoziyuan,Q_dongman';
+
+// 单次 HTTP 请求超时（毫秒）。5.5s 略高于 PanSou 的 4s 收集窗口（成功响应实测 4.5~6s），
+// 超时立刻换策略重试；失败多为 0.3~0.5s 的快速失败，所以总预算内通常能跑两三轮
+rule.wpTimeout = 5500;
+// 一次搜索的总时间预算（毫秒）——端上（zyfun 10s、TVBox 约 10s）等不起长等待
+rule.wpBudget = 7000;
+// 首页（推荐）的总时间预算（毫秒）
+rule.wpHomeBudget = 8000;
+// 首页热词，失败依次降级
+rule.wpHomeKw = ['全集', '合集', '动漫'];
+// 结果缓存时长（毫秒）：同一会话里重复进同一分类/关键词秒开
+rule.wpCacheTtl = 600000;
+// 缓存保留的最大条目数（列表按需截取）
+rule.wpCacheLimit = 250;
 
 // lazy 播放模式：1=交给播放器解析/嗅探（需端上配解析接口）；0=当直链原样交给播放器
 rule.wpPlayMode = 1;
@@ -178,8 +221,7 @@ rule.wpPerType = 25;
 rule.wpMaxLinks = 6;
 // 单条资源标题最大长度（同时用于列表显示和 vod_id 内嵌，中文 1 字 = 3 字节 = 4 base64 字符）
 rule.wpNameMax = 80;
-// 请求失败/空结果时的重试次数（PanSou 公共实例偶发限流、偶发 400）
-rule.wpRetry = 2;
+// 注：重试次数不再单独配置 —— 改为「在总时间预算内尽可能多轮换策略」，见 rule.wpFetch
 // 噪音过滤：TG 频道每日「更新目录」类帖子，命中即丢弃（不是具体资源）
 // 存字符串而非 RegExp —— rule 对象可能被引擎序列化传给 worker，RegExp 会退化成 {} 导致 .test 抛错
 rule.wpSkipRe = '更新目录|资源目录|目录汇总|今日更新|每日更新|更新汇总|^#+\\s*$';
@@ -210,30 +252,85 @@ rule.wpCleanNote = function (note) {
     return s;
 };
 
+/* ------------------------ 网络层（缓存 / 回退 / 预算） ------------------------ */
+
+rule.wpNow = function () {
+    return new Date().getTime();
+};
+
+/* 进程内结果缓存：rule 常驻引擎，同一会话里重复进同一分类/关键词直接命中，秒开 */
+rule.wpCache = {};
+
+rule.wpCacheGet = function (kw) {
+    try {
+        var c = rule.wpCache[kw];
+        if (!c) { return null; }
+        if (rule.wpNow() - c.t > rule.wpCacheTtl) {
+            delete rule.wpCache[kw];
+            return null;
+        }
+        return c.v;
+    } catch (e) { return null; }
+};
+
+rule.wpCachePut = function (kw, v) {
+    try { rule.wpCache[kw] = { t: rule.wpNow(), v: v }; } catch (e) { }
+};
+
 /**
- * 调 PanSou 搜索并按 note 合并 —— 返回 TVBox 列表项数组
- * 同一资源横跨多个网盘类型时合并为一条（多条网盘 → 二级里的多条线路）
- *
- * 容错：PanSou 返回的是「服务端 4 秒内已到达的部分结果」，同一关键词两次搜索
- *       条数会变（实测「全集」629 → 187）；公共实例并发突发时会限流/返回 400。
- *       故做重试 + 全量 try/catch 兜底，任一环节失败返回 []，绝不抛错。
+ * 单次请求 PanSou
+ * @param base 实例地址
+ * @param kw 关键词
+ * @param useChannels 是否带 channels 限定（精选频道模式）
+ * @param ms 本次请求超时（毫秒）——必须显式传，引擎默认只有 5s
  */
-rule.wpSearch = function (kw, limit) {
-    var api = rule.wpApi || rule.host;
-    var reqUrl = api + '/api/search?kw=' + encodeURIComponent(String(kw));
-    var obj = null;
-    var tries = rule.wpRetry || 1;
-    for (var attempt = 0; attempt < tries; attempt++) {
-        var raw = '';
-        try {
-            // 必须显式 timeout：PanSou 实测约 5s，超引擎默认 5s
-            raw = fetch(reqUrl, { headers: rule.headers, timeout: 15000 }) || '';
-        } catch (e) { raw = ''; }
-        obj = null;
-        try { obj = JSON.parse(raw); } catch (e) { obj = null; }
-        if (obj && obj.data) { break; }
+rule.wpFetchOne = function (base, kw, useChannels, ms) {
+    var qs = 'kw=' + encodeURIComponent(String(kw));
+    if (useChannels && rule.wpChannels) {
+        qs += '&channels=' + encodeURIComponent(rule.wpChannels);
     }
-    if (!obj || !obj.data) { return []; }
+    var url = String(base).replace(/\/+$/, '') + '/api/search?' + qs;
+    var raw = '';
+    try {
+        raw = fetch(url, { headers: rule.headers, timeout: ms }) || '';
+    } catch (e) { raw = ''; }
+    var obj = null;
+    try { obj = JSON.parse(raw); } catch (e) { obj = null; }
+    return obj;
+};
+
+/**
+ * 带回退的搜索请求：
+ *   主实例(精选频道) → 主实例(全量源) → 备实例(精选频道) → 备实例(全量源)
+ * 关键：公共实例的失败大多是 0.3~0.5s 的快速失败，所以在总预算内能跑完好几轮；
+ *       而总耗时被 budget 硬性约束，绝不会像「单次 15s 长等 + 再重试一次」那样
+ *       把端上（zyfun/TVBox 约 10s）直接拖超时 —— 这就是之前一直转圈失败的原因。
+ */
+rule.wpFetch = function (kw, budget) {
+    var apis = rule.wpApiList || [rule.wpApi];
+    var total = budget || rule.wpBudget;
+    var t0 = rule.wpNow();
+    var plan = [];
+    for (var a = 0; a < apis.length; a++) {
+        plan.push([apis[a], true]);
+        plan.push([apis[a], false]);
+    }
+    for (var i = 0; i < plan.length; i++) {
+        var left = total - (rule.wpNow() - t0);
+        if (left < 1200) { break; }
+        var ms = left > rule.wpTimeout ? rule.wpTimeout : left;
+        var obj = rule.wpFetchOne(plan[i][0], kw, plan[i][1], ms);
+        if (obj && obj.data) { return obj; }
+    }
+    return null;
+};
+
+/**
+ * 把 PanSou 响应组装成 TVBox 列表项（按 note 精确合并同一资源）
+ */
+rule.wpBuild = function (obj, limit) {
+    var out = [];
+    try {
     var mbt = obj.data.merged_by_type || {};
     var types = rule.wpTypes || [];
     var map = {};
@@ -267,7 +364,6 @@ rule.wpSearch = function (kw, limit) {
             }
         }
     }
-    var out = [];
     for (var oi = 0; oi < order.length && out.length < limit; oi++) {
         var r = map[order[oi]];
         if (!r || !r.l.length) { continue; }
@@ -284,7 +380,29 @@ rule.wpSearch = function (kw, limit) {
             vod_blurb: r.n
         });
     }
+    } catch (e) { return out; }
     return out;
+};
+
+/**
+ * 对外入口：搜索并按 note 合并 —— 返回 TVBox 列表项数组
+ * 先查缓存（命中即秒开），未命中则走「多策略回退 + 总预算约束」的请求，结果写入缓存
+ * 任一环节失败都返回 []，绝不抛错 —— 端上最多显示空分类，不会报错也不会卡死
+ */
+rule.wpSearch = function (kw, limit, budget) {
+    var k = String(kw || '').trim();
+    if (!k) { return []; }
+    var lim = limit || 24;
+    var cached = rule.wpCacheGet(k);
+    if (cached) {
+        return cached.length > lim ? cached.slice(0, lim) : cached;
+    }
+    var obj = null;
+    try { obj = rule.wpFetch(k, budget); } catch (e) { obj = null; }
+    if (!obj || !obj.data) { return []; }
+    var out = rule.wpBuild(obj, rule.wpCacheLimit || 250);
+    rule.wpCachePut(k, out);
+    return out.length > lim ? out.slice(0, lim) : out;
 };
 
 // 资源对象 → vod_id（带 http://wp/ 伪前缀，避免引擎对不含 http 的 id 做 base64 解码）

@@ -960,6 +960,54 @@
       "quickSearch": 1
     },
     {
+      "key": "247看",
+      "name": "247 • 影视",
+      "type": 3,
+      "api": "./js/drpy2.min.js",
+      "ext": "./js/247看.js",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 1
+    },
+    {
+      "key": "飞快TV",
+      "name": "飞快 • 影视",
+      "type": 3,
+      "api": "./js/drpy2.min.js",
+      "ext": "./js/飞快TV.js",
+      "searchable": 1,
+      "quickSearch": 1
+    },
+    {
+      "key": "E-ACG动漫",
+      "name": "E-ACG • 动漫",
+      "type": 3,
+      "api": "./js/drpy2.min.js",
+      "ext": "./js/E-ACG动漫.js",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 1
+    },
+    {
+      "key": "咕咕番",
+      "name": "咕咕 • 番剧",
+      "type": 3,
+      "api": "./js/drpy2.min.js",
+      "ext": "./js/咕咕番.js",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 1
+    },
+    {
+      "key": "网盘搜索",
+      "name": "网盘 • 搜索",
+      "type": 3,
+      "api": "./js/drpy2.min.js",
+      "ext": "./js/网盘搜索.js",
+      "searchable": 1,
+      "quickSearch": 1
+    },
+    {
       "key": "荐片",
       "name": "荐片 • 磁力",
       "api": "csp_JianPian",

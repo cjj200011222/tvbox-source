@@ -75,6 +75,9 @@ var rule = {
             if (left < 1200) { break; }
             out = rule.wpSearch(kws[i], 24, left);
             if (out && out.length) { break; }
+            // 是"请求失败"而不是"真没数据" → 实例整体有问题，换词也没用，立刻停
+            // （否则最坏会变成 3 个词 × 每词一轮请求 = 首页一次请求风暴）
+            if (rule.wpLastOk === false) { break; }
         }
         VODS = out;
     }),
@@ -83,7 +86,9 @@ var rule = {
         var idx = parseInt(String(MY_CATE).replace(/[^0-9]/g, ''), 10);
         var hot = rule.wpHot || [];
         var kw = hot[idx - 1] || '合集';
-        VODS = rule.wpSearch(kw, 80);
+        // 一次拿满缓存上限，再按页切片：翻页共用同一份缓存，不再重复请求网络；
+        // 翻过头返回 [] → 端上自然停止翻页（防无限下拉请求）
+        VODS = rule.wpPage(rule.wpSearch(kw, rule.wpCacheLimit || 250), MY_PAGE, rule.wpPageSize);
     }),
     二级: $js.toString(() => {
         // vodObj 先给全字段默认值：坏 id / 解码失败时也不会返回 undefined
@@ -142,7 +147,8 @@ var rule = {
     }),
     搜索: $js.toString(() => {
         var kw = String(KEY || '').trim();
-        VODS = kw ? rule.wpSearch(kw, 80) : [];
+        // 同一级：全量取一次进缓存，翻页只切片不再请求
+        VODS = kw ? rule.wpPage(rule.wpSearch(kw, rule.wpCacheLimit || 250), MY_PAGE, rule.wpPageSize) : [];
     }),
     lazy: $js.toString(() => {
         // 网盘分享链接 / 磁力链接都不能直出视频流，默认交解析器嗅探（见文件头限制说明）
@@ -191,6 +197,23 @@ rule.wpHomeKw = ['全集', '合集', '动漫'];
 rule.wpCacheTtl = 600000;
 // 缓存保留的最大条目数（列表按需截取）
 rule.wpCacheLimit = 250;
+// ⚠️ 请求失败后的冷却时长（毫秒）：这段时间内同一关键词直接返回空，一个请求都不发
+//    没有它的话，用户每刷新一次就会重新打满一轮请求（公共实例会 429 限流，越刷越糟）
+rule.wpFailTtl = 25000;
+// 单次搜索最多发几次 HTTP 请求（时间预算之外的第二道闸）
+// 注意：失败冷却只是"防反复"，这一条是"防单次过猛"
+rule.wpMaxReq = 3;
+// 剩余预算低于这个值就不再发起新请求（PanSou 成功响应要 4.5~6s，发也白发）
+rule.wpMinLeft = 2500;
+// ⚠️ 实例健康度：一个实例挂掉后会"卡住不响应"（不是快速失败），会把整个预算吃光
+//    导致备胎实例永远轮不上。所以失败后把它降级一段时间，期间直接跳过，
+//    把预算全部留给还能用的实例。连续失败 wpSickAfter 次、或出现一次无响应即降级。
+rule.wpSickTtl = 90000;
+rule.wpSickAfter = 2;
+// 缓存条目数上限，超出后丢掉最老的一半（防长时间使用内存无限增长）
+rule.wpCacheMax = 200;
+// 列表每页条数（一级/搜索共用，翻页只切片不重新请求）
+rule.wpPageSize = 24;
 
 // lazy 播放模式：1=交给播放器解析/嗅探（需端上配解析接口）；0=当直链原样交给播放器
 rule.wpPlayMode = 1;
@@ -258,24 +281,47 @@ rule.wpNow = function () {
     return new Date().getTime();
 };
 
-/* 进程内结果缓存：rule 常驻引擎，同一会话里重复进同一分类/关键词直接命中，秒开 */
+/* 进程内结果缓存：rule 常驻引擎，同一会话里重复进同一分类/关键词直接命中，秒开
+ *
+ * 条目结构 { t: 写入时间, v: 结果数组, ok: 是否请求成功 }
+ *   ok=true  —— 请求成功（v 可能为空数组 = 确实没这个资源），按 wpCacheTtl 缓存
+ *   ok=false —— 请求失败（实例挂了/超时），按 wpFailTtl 冷却
+ * **把"失败"也缓存起来是关键**：否则用户反复刷新、反复进同一分类、
+ * 或 TVBox 翻页时，每一次都会重新打满一轮请求，既慢又会被公共实例限流。
+ */
 rule.wpCache = {};
 
-rule.wpCacheGet = function (kw) {
+rule.wpCacheEntry = function (kw) {
     try {
         var c = rule.wpCache[kw];
         if (!c) { return null; }
-        if (rule.wpNow() - c.t > rule.wpCacheTtl) {
+        var ttl = c.ok ? rule.wpCacheTtl : rule.wpFailTtl;
+        if (rule.wpNow() - c.t > ttl) {
             delete rule.wpCache[kw];
             return null;
         }
-        return c.v;
+        return c;
     } catch (e) { return null; }
 };
 
-rule.wpCachePut = function (kw, v) {
-    try { rule.wpCache[kw] = { t: rule.wpNow(), v: v }; } catch (e) { }
+rule.wpCachePut = function (kw, v, ok) {
+    try {
+        rule.wpCache[kw] = { t: rule.wpNow(), v: v, ok: ok !== false };
+        // 容量上限：超出后丢掉最老的一半，防长时间使用内存无限增长
+        var keys = [];
+        for (var k in rule.wpCache) {
+            if (Object.prototype.hasOwnProperty.call(rule.wpCache, k)) { keys.push(k); }
+        }
+        if (keys.length > rule.wpCacheMax) {
+            keys.sort(function (a, b) { return rule.wpCache[a].t - rule.wpCache[b].t; });
+            var drop = keys.length - Math.floor(rule.wpCacheMax / 2);
+            for (var d = 0; d < drop; d++) { delete rule.wpCache[keys[d]]; }
+        }
+    } catch (e) { }
 };
+
+// 上一次 wpSearch 是否是"请求成功"（供首页判断是否还要换词）
+rule.wpLastOk = true;
 
 /**
  * 单次请求 PanSou
@@ -300,29 +346,103 @@ rule.wpFetchOne = function (base, kw, useChannels, ms) {
 };
 
 /**
+ * 统计一次响应里共有多少条原始结果（用来判断"有没有数据"）
+ */
+rule.wpCount = function (obj) {
+    try {
+        var mbt = (obj && obj.data && obj.data.merged_by_type) || {};
+        var n = 0;
+        for (var k in mbt) {
+            if (Object.prototype.hasOwnProperty.call(mbt, k)) { n += (mbt[k] || []).length; }
+        }
+        return n;
+    } catch (e) { return 0; }
+};
+
+/**
  * 带回退的搜索请求：
  *   主实例(精选频道) → 主实例(全量源) → 备实例(精选频道) → 备实例(全量源)
+ *
+ * ⚠️ 空结果不算成功：精选频道对冷门词可能一条都没有（覆盖不到），
+ *    若把它当成功就会缓存一个空列表 10 分钟，用户看到的一直是"无数据"。
+ *    所以拿到 0 条时先存着，继续换策略，全都空了才认这个空结果。
  * 关键：公共实例的失败大多是 0.3~0.5s 的快速失败，所以在总预算内能跑完好几轮；
  *       而总耗时被 budget 硬性约束，绝不会像「单次 15s 长等 + 再重试一次」那样
  *       把端上（zyfun/TVBox 约 10s）直接拖超时 —— 这就是之前一直转圈失败的原因。
  */
+/* 实例健康度：{ 实例地址: {fails: 连续失败次数, until: 降级到期时间戳} } */
+rule.wpHealth = {};
+
+rule.wpMarkOk = function (base) {
+    try { rule.wpHealth[base] = { fails: 0, until: 0 }; } catch (e) { }
+};
+
+// slow=true 表示"卡住不响应"（几乎用满超时），比快速失败严重，直接降级
+rule.wpMarkFail = function (base, slow) {
+    try {
+        var h = rule.wpHealth[base] || { fails: 0, until: 0 };
+        h.fails += 1;
+        if (slow || h.fails >= rule.wpSickAfter) {
+            h.until = rule.wpNow() + rule.wpSickTtl;
+        }
+        rule.wpHealth[base] = h;
+    } catch (e) { }
+};
+
+rule.wpSick = function (base) {
+    try {
+        var h = rule.wpHealth[base];
+        return !!(h && h.until > rule.wpNow());
+    } catch (e) { return false; }
+};
+
 rule.wpFetch = function (kw, budget) {
     var apis = rule.wpApiList || [rule.wpApi];
     var total = budget || rule.wpBudget;
+    var maxReq = rule.wpMaxReq || 3;
+    var minLeft = rule.wpMinLeft || 2500;
     var t0 = rule.wpNow();
-    var plan = [];
-    for (var a = 0; a < apis.length; a++) {
-        plan.push([apis[a], true]);
-        plan.push([apis[a], false]);
+    // 健康的排前面；全都降级了就都试一遍（给恢复的机会，否则会永久锁死）
+    var order = [];
+    var sick = [];
+    for (var i = 0; i < apis.length; i++) {
+        if (rule.wpSick(apis[i])) { sick.push(apis[i]); } else { order.push(apis[i]); }
     }
-    for (var i = 0; i < plan.length; i++) {
-        var left = total - (rule.wpNow() - t0);
-        if (left < 1200) { break; }
-        var ms = left > rule.wpTimeout ? rule.wpTimeout : left;
-        var obj = rule.wpFetchOne(plan[i][0], kw, plan[i][1], ms);
-        if (obj && obj.data) { return obj; }
+    if (!order.length) { order = sick; }
+    var sent = 0;
+    var fallback = null;   // "成功但 0 条"的结果先存着，后面遇到有数据的就覆盖它
+    var errored = false;   // 是否有过真正的请求失败（区别于"返回了空"）
+    for (var a = 0; a < order.length; a++) {
+        var base = order[a];
+        // 每个实例两种策略：先精选频道（快），不行再全量源
+        var modes = rule.wpChannels ? [true, false] : [false];
+        for (var m = 0; m < modes.length; m++) {
+            if (sent >= maxReq) { break; }
+            var left = total - (rule.wpNow() - t0);
+            if (left < minLeft) { break; }   // 预算不够一次像样的请求，别白发
+            var ms = left > rule.wpTimeout ? rule.wpTimeout : left;
+            var t1 = rule.wpNow();
+            sent++;
+            var obj = rule.wpFetchOne(base, kw, modes[m], ms);
+            if (obj && obj.data) {
+                rule.wpMarkOk(base);
+                if (rule.wpCount(obj) > 0) { return obj; }
+                if (!fallback) { fallback = obj; }
+                // 0 条：继续换策略碰碰运气（精选频道覆盖不到的冷门词很常见）
+                continue;
+            }
+            errored = true;
+            // 用掉 85% 以上的超时才算"无响应" → 别再试它别的策略了，立刻换实例
+            // （用相对比例而不是固定余量，否则超时值调小时会把快速失败误判成卡死）
+            var slow = (rule.wpNow() - t1) >= (ms * 0.85);
+            rule.wpMarkFail(base, slow);
+            if (slow) { break; }
+        }
     }
-    return null;
+    // 只要中途有过请求失败，就不把"空结果"当真数据返回 —— 否则会把一个
+    // 由故障造成的空列表缓存 10 分钟，用户看到的一直是"无数据"。
+    // 返回 null 走失败冷却（25s 后可重试），好过错误地长期缓存空结果。
+    return errored ? null : fallback;
 };
 
 /**
@@ -386,23 +506,50 @@ rule.wpBuild = function (obj, limit) {
 
 /**
  * 对外入口：搜索并按 note 合并 —— 返回 TVBox 列表项数组
- * 先查缓存（命中即秒开），未命中则走「多策略回退 + 总预算约束」的请求，结果写入缓存
+ * 先查缓存（命中即秒开，且**命中失败冷却时一个请求都不发**），
+ * 未命中才走「多策略回退 + 总预算约束」的请求，结果一律写入缓存（含失败）
  * 任一环节失败都返回 []，绝不抛错 —— 端上最多显示空分类，不会报错也不会卡死
+ *
+ * 副作用：会把本次是否请求成功写进 rule.wpLastOk，供首页决定要不要继续换词
  */
 rule.wpSearch = function (kw, limit, budget) {
     var k = String(kw || '').trim();
-    if (!k) { return []; }
+    if (!k) { rule.wpLastOk = true; return []; }
     var lim = limit || 24;
-    var cached = rule.wpCacheGet(k);
-    if (cached) {
-        return cached.length > lim ? cached.slice(0, lim) : cached;
+    var e = rule.wpCacheEntry(k);
+    if (e) {
+        rule.wpLastOk = e.ok;
+        if (!e.ok) { return []; }
+        return e.v.length > lim ? e.v.slice(0, lim) : e.v;
     }
     var obj = null;
-    try { obj = rule.wpFetch(k, budget); } catch (e) { obj = null; }
-    if (!obj || !obj.data) { return []; }
+    try { obj = rule.wpFetch(k, budget); } catch (err) { obj = null; }
+    if (!obj || !obj.data) {
+        // 请求失败：写一段短冷却，冷却期内不再发请求（防刷新风暴）
+        rule.wpCachePut(k, [], false);
+        rule.wpLastOk = false;
+        return [];
+    }
     var out = rule.wpBuild(obj, rule.wpCacheLimit || 250);
-    rule.wpCachePut(k, out);
+    rule.wpCachePut(k, out, true);
+    rule.wpLastOk = true;
     return out.length > lim ? out.slice(0, lim) : out;
+};
+
+/**
+ * 按页切片：翻页共用同一份缓存结果，翻过头返回 [] 让端上自然停止
+ * 这同时解决了两个问题：
+ *   ① 翻页不再重复请求同一个关键词（否则用户一直下拉就是一直请求）
+ *   ② 以前每页都返回同样的内容，现在是真正的分页
+ */
+rule.wpPage = function (all, page, size) {
+    var arr = all || [];
+    var sz = parseInt(String(size), 10) || 24;
+    var p = parseInt(String(page).replace(/[^0-9]/g, ''), 10);
+    if (!p || p < 1) { p = 1; }
+    var start = (p - 1) * sz;
+    if (start >= arr.length) { return []; }
+    return arr.slice(start, start + sz);
 };
 
 // 资源对象 → vod_id（带 http://wp/ 伪前缀，避免引擎对不含 http 的 id 做 base64 解码）

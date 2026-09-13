@@ -115,7 +115,8 @@ var rule = {
                 vodObj.vod_name = note;
                 vodObj.vod_pic = data.p || '';
                 vodObj.vod_remarks = links.length + ' 条链接';
-                // 按网盘类型分线路：同类型下的多条分享作为「多集」
+                // 按网盘类型分线路：同类型下的多条分享作为「多集」，集数标签用「第01集」
+                // 样式（和其它网盘源一致，用户好识别）；有提取码的标进 remark 由端上展示
                 var byType = {};
                 var typeOrder = [];
                 links.forEach(function (lk) {
@@ -125,8 +126,9 @@ var rule = {
                     if (!u) { return; }
                     if (!byType[t]) { byType[t] = []; typeOrder.push(t); }
                     var no = byType[t].length + 1;
-                    var label = pw ? ('链接' + no + '·提取码' + pw) : ('链接' + no);
-                    byType[t].push(label + '$' + u);
+                    // 「第01集」与其它网盘源的展示一致；若带提取码补在后半段，不破坏 name 部分
+                    var nm = '第' + (no < 10 ? '0' + no : no) + '集';
+                    byType[t].push(nm + '$' + u + (pw ? '@@' + pw : ''));
                 });
                 var froms = [];
                 var urls = [];
@@ -138,6 +140,7 @@ var rule = {
                 vodObj.vod_play_url = urls.join('$$$');
                 var desc = note + '\n\n共 ' + links.length + ' 条网盘链接，覆盖：'
                     + froms.join('、') + '。'
+                    + '\n提示：「第01集/第02集」是同一资源在不同网盘/不同账号的分享链接，并非剧集序号；带提取码的已附在链接里。'
                     + '\n点下方线路打开对应分享页（网盘链接需在网盘 App / 网页中打开并转存，不能直接播放）。';
                 vodObj.vod_content = desc;
                 vodObj.vod_blurb = desc.substring(0, 100);
@@ -152,13 +155,22 @@ var rule = {
     }),
     lazy: $js.toString(() => {
         // 网盘分享链接 / 磁力链接都不能直出视频流，默认交解析器嗅探（见文件头限制说明）
+        // 集名后缀「@@提取码」：分享码不能丢，随链接传到这里，展示给用户同时不进 URL
         try {
-            var u = String(input).trim();
+            var raw = String(input).trim();
+            // 「url@@提取码」格式：码只用于展示，剥离后再交给播放器
+            var parts = raw.split('@@');
+            var u = parts[0];
+            var pw = parts.length > 1 ? String(parts[1] || '') : '';
             var mode = rule.wpPlayMode;
             if (/^magnet:/i.test(u)) {
                 input = { parse: mode, url: u, js: '' };
             } else if (/^https?:\/\//i.test(u)) {
-                input = { parse: mode, url: u, headers: rule.headers };
+                // 有提取码且 URL 里还没带上（PanSou 部分数据 URL 自带 ?pwd=xxx，别重复追加）
+                var finalUrl = (pw && u.indexOf(pw) < 0)
+                    ? (u + (u.indexOf('?') >= 0 ? '&' : '?') + 'pwd=' + encodeURIComponent(pw))
+                    : u;
+                input = { parse: mode, url: finalUrl, headers: rule.headers };
             } else {
                 input = { parse: 0, url: '网盘搜索:无效链接', js: '' };
             }

@@ -176,9 +176,11 @@ var rule = {
                     var desc = note + '\n\n共 ' + links.length + ' 条网盘链接，覆盖：'
                         + froms.join('、') + '。';
                     if (played) {
-                        desc += '\n✅ 已登录夸克：「夸克直链」线路可直接播放（首次点击需转存，约 2~5 秒）。';
-                        if (!rule.qtLoginState()) {
-                            desc += '\n⚠️ 播放通道（TV授权）未完成：2026-02 起夸克封禁普通直链，请进「扫码登录」分类扫第二张二维码，否则点了会播放失败。';
+                        desc += '\n✅ 已登录夸克：「夸克直链」线路可直接播放。';
+                        // 手机端（9978 本地服务在）：本地代理 + 配置中心 cookie，点开即播，无需 TV 码
+                        // zyfun / 无本地服务端：需要 TV 授权通道，给明确引导
+                        if (!rule.qkProxyMode() && !rule.qtLoginState()) {
+                            desc += '\n⚠️ 本端缺少播放通道：手机TVBox请在「配置中心」源扫码登录夸克（本源自动共用）；电脑zyfun请进「扫码登录」分类扫第二张TV码。';
                         }
                     } else {
                         desc += '\n提示：「第01集/第02集」是同一资源在不同网盘/不同账号的分享链接，并非剧集序号。'
@@ -361,6 +363,50 @@ rule.QUARK_CK_KEY = 'wp_quark_cookie';
 rule.QUARK_NICK_KEY = 'wp_quark_nick';
 // 转存临时目录名（用户网盘里可见；每次播放前清理旧的）
 rule.qkTmpDir = 'TVBox播放缓存';
+
+/* ===== 手机端本地代理通道（2026-09-13 第二次改造，配置中心 cookie 的正确用法） =====
+ * 真相（反编译 tvbox/spider.jar 的 merge/F/a + merge/b/w + Pan 类实证）：
+ * 手机端「趣盘」等 Java 源能播夸克，靠的不是把直链交给播放器（那也会被 412 拦），
+ * 而是把剧集 URL 生成为 **本地代理**：
+ *     http://127.0.0.1:9978/proxy?do=pan&site=quark&shareId={pwd_id}&fileId={fid}&fileToken={share_fid_token}
+ * 播放器请求这个 URL → FongMi 壳把请求转给 jar 的 Proxy/Pan.proxy() → jar 在 app 内部
+ * （okhttp 网络栈）实时完成 stoken→转存→acquire_dl_token(伪装 Mac 客户端)→file/download→
+ * 流式转发/302，用的是 /sdcard/TVBox/quark_cookie.txt（配置中心）那份 cookie。
+ * 服务端拦的是"脚本直连 CDN 的请求模式"，app 内 okhttp 转发不受影响 —— 趣盘一直能播的原因。
+ * drpy 规则侧只需拼出这个代理 URL（parse:0），无需 TV 扫码、无需自己转存。
+ * 通道判定：探测 127.0.0.1:9978 是否存在（手机端 FongMi 系才有；zyfun 无此服务自动跳过）
+ */
+rule.qkProxyProbe = function () {
+    try {
+        var now = rule.wpNow();
+        var c = rule._qkProxyCache;
+        if (c && now - c.t < 300000) { return c.ok; }   // 5 分钟内不重探
+        var raw = '';
+        try {
+            raw = request('http://127.0.0.1:9978/proxy?do=ck', { timeout: 2500, withHeaders: false });
+        } catch (e) { raw = ''; }
+        // jar 的 Proxy.adjustLocalPort 就是这么探的：do=ck 回 "ok" 即本地服务在
+        // ⚠️ 引擎 request() 对错误响应可能抛异常也可能返回空串——两者都当作"服务不在"
+        var txt = String(raw || '').replace(/^\s+|\s+$/g, '');
+        var ok = txt === 'ok' || txt.toLowerCase() === 'ok';
+        rule._qkProxyCache = { t: now, ok: ok };
+        return ok;
+    } catch (e) {
+        rule._qkProxyCache = { t: rule.wpNow(), ok: false };
+        return false;
+    }
+};
+// 播放通道决策：true = 手机端本地代理可用（走 do=pan 代理，复用配置中心 cookie）
+rule.qkProxyMode = function () {
+    return rule.qkProxyProbe();
+};
+// 拼本地代理播放 URL（参数语义与 jar 的 Fa.a 完全一致）
+rule.qkProxyUrl = function (pwdId, fid, fidToken) {
+    return 'http://127.0.0.1:9978/proxy?do=pan&site=quark'
+        + '&shareId=' + encodeURIComponent(pwdId)
+        + '&fileId=' + encodeURIComponent(fid)
+        + '&fileToken=' + encodeURIComponent(fidToken || '');
+};
 
 /* ===== QuarkTV 通道（2026-09-13 新增，播放直链的救星） =====
  * 背景：2026-02-12 起夸克 CDN 风控——PC cookie（__pus/__puus）通过 v2/play / file/download
@@ -796,6 +842,19 @@ rule.wpLoginList = function (page) {
     var list = [];
     var pcOk = rule.wpQuarkLoginState();
     var tvOk = rule.qtLoginState();
+    var proxyOk = rule.qkProxyMode();   // 手机端本地代理在（9978）：播放走它 + 配置中心 cookie
+    // 手机端：有本地代理时播放不需要 TV 码（只看转存登录）
+    if (proxyOk && pcOk) {
+        var srcP = rule.qkLoginSource();
+        var srcNameP = srcP === 'cfg' ? '配置中心共享' : (srcP === 'own' ? '本源扫码' : '已登录');
+        return [{
+            vod_id: 'http://wp/login/status',
+            vod_name: '夸克已就绪 · 点击管理',
+            vod_pic: '',
+            vod_remarks: '转存:' + srcNameP + ' | 播放:本地代理',
+            vod_blurb: '转存登录（' + srcNameP + '）+ 播放通道（手机端本地代理）都已就绪，夸克资源点开即播'
+        }];
+    }
     // 两通道都就绪 → 只显示管理卡
     if (pcOk && tvOk) {
         var src = rule.qkLoginSource();
@@ -830,7 +889,8 @@ rule.wpLoginList = function (page) {
             });
         }
     }
-    // 播放登录（TV 令牌）：2026-02 起夸克风控 PC 直链，播放必须走 TV 通道
+    // 播放登录（TV 令牌）：手机端有本地代理就不需要（上面已提前返回）；
+    // zyfun 等无本地代理的端，2026-02 起夸克风控 PC 直链，播放走 TV 通道
     if (!tvOk) {
         // TV 二维码：open-api 直接返回 base64 PNG，没法直接当 vod_pic 用 URL 展示 —— 存会话内，二级里用 dataURI
         var tvQr = rule.qtLoginQr();
@@ -922,11 +982,14 @@ rule.wpLoginDetail = function (id) {
             vod.vod_play_url = '重新检测配置中心登录$qkredetect#清除失效登录$qqklogout';
         }
         lines.push('');
-        if (tvOk) {
+        var proxyOk2 = rule.qkProxyMode();
+        if (proxyOk2) {
+            lines.push('✅ 播放通道：手机端本地代理（127.0.0.1:9978）已就绪\n   播放由端上 spider 完成（转存+取直链+流式转发一体），共用上面的转存登录，无需额外授权');
+        } else if (tvOk) {
             lines.push('✅ 播放通道：TV 直链已授权（2026-02 起夸克封禁普通直链，播放走此通道）');
             vod.vod_play_url += '#退出TV登录$qtvlogout';
         } else {
-            lines.push('❌ 播放通道：未授权 —— 2026-02 起夸克封禁普通直链（412），没这步播不了！\n   回列表扫第二张二维码完成 TV 授权');
+            lines.push('❌ 播放通道：未授权 —— 本端无 9978 本地服务，2026-02 起夸克封禁普通直链（412）\n   手机TVBox：在「配置中心」源扫码登录夸克即可（自动共用）；电脑zyfun：回列表扫第二张TV码');
         }
         lines.push('\n说明：「退出登录」仅停用本源（不影响趣盘等其它源）；配置中心重新扫码后点「重新检测」即可恢复。');
         vod.vod_content = lines.join('\n');
@@ -1188,6 +1251,23 @@ rule.qkCleanup = function (ck) {
 // 完整流程失败时返回错误提示对象（不嗅探、不挂起）
 // 登录失效时自动强刷配置中心 cookie 重试一轮（配置中心那边可能刚重新扫过码）
 rule.wpQuarkPlay = function (b64payload) {
+    // ★ 手机端本地代理通道（2026-09-13）：9978 在 → 全部播放逻辑由端上 jar 完成，
+    // 规则侧只要拼代理 URL（连 stoken 都不用自己拿——jar 实时处理，无会话绑定问题）
+    // cookie 校验仍做（配置中心 cookie 是 jar 转存的凭证；没有时引导先去配置中心扫码）
+    if (rule.qkProxyMode()) {
+        var ckp = '';
+        try { ckp = rule.qkCookie(true) || ''; } catch (e) { ckp = ''; }
+        if (!ckp) {
+            return { parse: 0, url: '网盘搜索·夸克:未登录，请先在「配置中心」源扫码登录夸克（本源自动共用其登录）', js: '' };
+        }
+        try {
+            var payp = JSON.parse(rule.b64d(String(b64payload)));
+            if (!payp || !payp.f) { return { parse: 0, url: '网盘搜索·夸克:无效的播放参数', js: '' }; }
+            return { parse: 0, url: rule.qkProxyUrl(payp.p, payp.f, payp.t || ''), js: '' };
+        } catch (e) {
+            return { parse: 0, url: '网盘搜索·夸克:播放参数解析失败', js: '' };
+        }
+    }
     // force=true：跳过会话缓存直接读配置中心文件（播放是低频操作，值得强刷一次）
     var ck = rule.qkCookie(true);
     if (!ck) { return { parse: 0, url: '网盘搜索·夸克:未登录，请进「扫码登录」分类重新扫码', js: '' }; }
@@ -1247,6 +1327,17 @@ rule.wpQuarkPlayInner = function (b64payload, ck, isRetry) {
             }
         } catch (e) { }
         if (fidToken) { saveToken = fidToken; }
+
+        // ★ 手机端本地代理通道（2026-09-13）：9978 服务在（FongMi 系手机端）→ 直接把
+        // do=pan 代理 URL 交给播放器，转存/直链全部由端上 jar 用配置中心 cookie 完成，
+        // 不需要这边转存（省一轮 save/task 请求），也天然绕过 CDN 对脚本直连的风控
+        if (rule.qkProxyMode()) {
+            return {
+                parse: 0,
+                url: rule.qkProxyUrl(pay.p, pay.f, fidToken || saveToken),
+                js: ''
+            };
+        }
 
         // 1) 找根目录下已有的临时目录 fid（没有就转存到根目录，播放完统一清理）
         var dirFid = '0';
@@ -1359,9 +1450,7 @@ rule.wpQuarkPlayInner = function (b64payload, ck, isRetry) {
         }
         if (!savedFid) { return fail('转存完成但未拿到文件 id（task 未完成或响应结构变化）'); }
 
-        // 3) 取直链 —— 优先 TV 通道（2026-09-13 风控后唯一能直连播放的路）
-        // 背景：PC cookie 的 v2/play 直链已被夸克 CDN 全面拦截（412/403，任何头组合无效）
-        // TV 令牌（open-api-drive.quark.cn file?method=streaming）签发的是 302 直链，可直连
+        // 3) 取直链 —— 无本地代理时走 TV 令牌通道（open-api-drive streaming 302 直链可直连）
         var direct = '';
         if (rule.qtLoginState()) {
             try {
@@ -1369,8 +1458,8 @@ rule.wpQuarkPlayInner = function (b64payload, ck, isRetry) {
             } catch (e) { direct = ''; }
             if (!direct) { return fail('TV直链获取失败（授权可能已过期，回「扫码登录」重新扫TV码）'); }
         } else {
-            // TV 未登录：PC 直链反正播不了（412 风控），不浪费请求，直接引导扫 TV 码
-            return fail('未做TV扫码登录：夸克已于2026-02起风控PC直链（直连被412拦截），请进「扫码登录」分类扫第二张二维码完成电视端授权');
+            // TV 未登录且无本地代理：PC 直链反正播不了（412 风控），直接引导
+            return fail('本端不支持直接播放：手机TVBox请在「配置中心」源扫码登录夸克（本源自动共用其登录）；zyfun请进「扫码登录」扫第二张TV码');
         }
 
         // 4) 后台清理旧缓存（不等结果，下一次播放前也会清理）

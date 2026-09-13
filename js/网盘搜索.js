@@ -13,6 +13,14 @@
  *   → 调官方 API 取视频直链 → 播放后清理转存文件），与趣盘体验一致。
  *   cookie 通过引擎 setItem 持久化（手机端存本地；zyfun 端会话级，重启后需重扫）。
  *
+ * ✅ 配置中心 Cookie 共享（2026-09-13 新增，手机端 TVBox 专用）：
+ *   FongMi 系端上的本地服务把 /sdcard/ 映射为 http://127.0.0.1:9978/file/，
+ *   配置中心（csp_Config，Java spider）扫码登录后把夸克 Cookie 明文写在
+ *   /sdcard/TVBox/quark_cookie.txt（JSON：{nickname, member_type, cookie}）。
+ *   我们的 drpy 规则与 Java spider 跑在同一个 App 里，直接读这个文件即可
+ *   **复用配置中心的登录态——已扫码过的手机不用再扫第二次**。
+ *   取值顺序：自有存储 → 内存 → 配置中心文件；zyfun 端无本地服务自动跳过。
+ *
  * ⚠️ 未登录 / 非夸克资源的限制（务必知晓）：
  *   网盘分享链接是网页地址，**不能直接当视频流播放**。普通线路 lazy 默认 parse:1
  *   （交给播放器嗅探/解析接口），能否播放取决于你端上是否配了网盘解析服务。
@@ -192,10 +200,22 @@ var rule = {
         try {
             var rawIn = String(input).trim();
             if (rawIn === 'qqklogout') {
-                // 退出登录：清存储与内存
+                // 退出登录：清存储与内存；置 ignore 标记让配置中心共享也停用
+                // （配置中心的 cookie 文件不动 —— 趣盘等 Java 源还要用，只是本源不再读它）
                 try { setItem(rule.QUARK_CK_KEY, ''); } catch (e) { }
                 rule._qkCk = '';
+                rule._qkIgnoreCfg = true;
+                rule._qkCfgCache = null;
                 input = { parse: 0, url: '已退出登录，回列表重新扫码即可再次登录', js: '' };
+            } else if (rawIn === 'qkredetect') {
+                // 重新检测配置中心：清 ignore 标记并强刷一次（配置中心里重新扫码后用这个）
+                rule._qkIgnoreCfg = false;
+                rule._qkCfgCache = null;
+                var nck = rule.qkCfgCenterCookie(true);
+                if (nck) { rule._qkCk = nck; }
+                input = nck
+                    ? { parse: 0, url: '已检测到配置中心的夸克登录，现在可以直接播放了', js: '' }
+                    : { parse: 0, url: '未检测到配置中心登录：请先在「配置中心」源里扫码登录夸克，再回来点这项', js: '' };
             } else if (rawIn.indexOf('qk://') === 0) {
                 // 夸克直链剧集：转存 → 取直链 → 直接播放（不嗅探）
                 input = rule.wpQuarkPlay(rawIn.slice(5));
@@ -327,6 +347,8 @@ rule.wpSkipRe = '更新目录|资源目录|目录汇总|今日更新|每日更�
 
 // 夸克登录 cookie 的存储键
 rule.QUARK_CK_KEY = 'wp_quark_cookie';
+// 夸克昵称的存储键（显示用，可不存）
+rule.QUARK_NICK_KEY = 'wp_quark_nick';
 // 转存临时目录名（用户网盘里可见；每次播放前清理旧的）
 rule.qkTmpDir = 'TVBox播放缓存';
 
@@ -346,11 +368,16 @@ rule.qkHeaders = function (ck) {
     return h;
 };
 
-// 登录态 cookie（优先存储，其次内存）
-rule.qkCookie = function () {
+// 登录态 cookie 的取值顺序：
+//   ① 引擎存储（本源自己扫码存的） ② 内存 ③ 配置中心共享文件（仅手机端 TVBox 有）
+// ④ 配置中心文件在会话内缓存（探端口别每次都做）；"退出登录"后置 ignore 标记跳过 ③
+rule.qkCookie = function (forceFile) {
     var ck = '';
     try { ck = getItem(rule.QUARK_CK_KEY, '') || ''; } catch (e) { ck = ''; }
     if (!ck) { ck = rule._qkCk || ''; }
+    if (!ck && !(rule._qkIgnoreCfg || false)) {
+        ck = rule.qkCfgCenterCookie(forceFile);
+    }
     return ck;
 };
 rule.qkSetCookie = function (ck) {
@@ -360,6 +387,61 @@ rule.qkSetCookie = function (ck) {
 // 已登录？（有 cookie 即视为已登录；失效会在播放时报错并自动清掉）
 rule.wpQuarkLoginState = function () {
     return !!rule.qkCookie();
+};
+// 登录态来源（列表/管理页显示用）：'own'=本源扫码，'cfg'=配置中心共享，''=未登录
+rule.qkLoginSource = function () {
+    var ck = '';
+    try { ck = getItem(rule.QUARK_CK_KEY, '') || ''; } catch (e) { ck = ''; }
+    if (ck) { return 'own'; }
+    if (rule._qkCk) { return 'own'; }
+    if (!(rule._qkIgnoreCfg || false) && rule.qkCfgCenterCookie(false)) { return 'cfg'; }
+    return '';
+};
+
+/* ---------- 配置中心 Cookie 共享（手机端 TVBox 专用） ----------
+ * csp_Config（配置中心 Java spider）扫码登录后把 cookie 写到
+ * /sdcard/TVBox/quark_cookie.txt；FongMi 系端上自带本地服务
+ * http://127.0.0.1:9978/file/ 映射 /sdcard/，规则 request() 即可读（无需权限）。
+ * zyfun / 无本地服务的端：请求快速失败，自动跳过，不影响任何原有行为。
+ */
+rule.qkCfgFile = 'http://127.0.0.1:9978/file/TVBox/quark_cookie.txt';
+// 会话内探测缓存：{ t: 时间, ck: cookie } —— 成功 10 分钟 / 失败 60 秒内不再探
+rule.qkCfgTtl = 600000;
+rule.qkCfgFailTtl = 60000;
+rule.qkCfgCenterCookie = function (force) {
+    try {
+        var now = rule.wpNow();
+        var c = rule._qkCfgCache;
+        if (!force && c) {
+            var ttl = c.ck ? rule.qkCfgTtl : rule.qkCfgFailTtl;
+            if (now - c.t < ttl) { return c.ck || ''; }
+        }
+        var raw = request(rule.qkCfgFile, { timeout: 3000, withHeaders: false });
+        var ck = '';
+        var obj = null;
+        try { obj = JSON.parse(raw); } catch (e) { obj = null; }
+        // 文件格式：{"nickname":"x","member_type":"SUPER_VIP","cookie":"__pus=...;"}
+        if (obj && obj.cookie) {
+            ck = String(obj.cookie).trim();
+            // 只要 __pus/__puus（与自扫码保持同构，跟踪 cookie 不带）
+            var keep = [];
+            var m1 = ck.match(/__pus=[^;]+/);
+            var m2 = ck.match(/__puus=[^;]+/);
+            if (m1) { keep.push(m1[0]); }
+            if (m2) { keep.push(m2[0]); }
+            ck = keep.join('; ');
+            // 配置中心文件自带昵称，顺手记下（管理页显示用）
+            if (obj.nickname) {
+                rule._qkNick = String(obj.nickname);
+                try { setItem(rule.QUARK_NICK_KEY, rule._qkNick); } catch (e2) { }
+            }
+        }
+        rule._qkCfgCache = { t: now, ck: ck };
+        return ck;
+    } catch (e) {
+        rule._qkCfgCache = { t: rule.wpNow(), ck: '' };
+        return '';
+    }
 };
 
 /* ---------- 登录流程 ---------- */
@@ -417,6 +499,14 @@ rule.qkQrPoll = function (token) {
             if (m2) { ck += (ck ? '; ' : '') + m2[0]; }
             if (ck) {
                 rule.qkSetCookie(ck);
+                // account/info 的 body 里有昵称，顺手存下来（管理页显示用）
+                try {
+                    var bobj = JSON.parse(hj.body);
+                    if (bobj && bobj.data && bobj.data.nickname) {
+                        rule._qkNick = String(bobj.data.nickname);
+                        try { setItem(rule.QUARK_NICK_KEY, rule._qkNick); } catch (e2) { }
+                    }
+                } catch (e2) { }
                 return true;
             }
         }
@@ -430,12 +520,14 @@ rule.wpLoginList = function (page) {
     if (String(page).replace(/[^0-9]/g, '') !== '1') { return []; }
     if (rule.wpQuarkLoginState()) {
         // 已登录：展示状态卡片（进入二级可看账号信息/退出登录）
+        var src = rule.qkLoginSource();
+        var srcName = src === 'cfg' ? '配置中心共享' : (src === 'own' ? '本源扫码' : '已登录');
         return [{
             vod_id: 'http://wp/login/status',
             vod_name: '夸克已登录 · 点击管理',
             vod_pic: '',
-            vod_remarks: '正常',
-            vod_blurb: '夸克已登录，夸克/UC 资源可点开即播（自动转存取直链）'
+            vod_remarks: srcName,
+            vod_blurb: '夸克已登录（' + srcName + '），夸克/UC 资源可点开即播（自动转存取直链）'
         }];
     }
     // 未登录：生成新二维码
@@ -476,21 +568,34 @@ rule.wpLoginDetail = function (id) {
         };
         // 用 member 接口验证 cookie 是否还有效
         var ck = rule.qkCookie();
+        var src = rule.qkLoginSource();
         var raw = request('https://drive-pc.quark.cn/1/clouddrive/member?pr=ucpro&fr=pc&uc_param_str=&fetch_subscribe=true&_ch=home&fetch_identity=true', {
             headers: rule.qkHeaders(ck),
             timeout: 10000
         });
         var obj = null;
         try { obj = JSON.parse(raw); } catch (e) { obj = null; }
-        var member = (obj && obj.data && obj.data.member) ? obj.data.member : null;
-        if (member) {
-            vod.vod_content = '当前登录：' + String(member.nick_name || member.display_name || '已登录')
-                + '（' + (member.is_vip ? '会员' : '普通用户') + '）'
-                + '\n\n点「退出登录」清除本机保存的夸克登录态。';
+        // member 接口 data 结构（实测 2026-09-13）：cookie 有效 → data 直接含 member_type 等
+        // （无 member 子对象；无效 → 无 data 或 status 非 200）
+        var memberOk = !!(obj && rule.qkOk(obj) && obj.data && (obj.data.member || obj.data.member_type));
+        if (memberOk) {
+            // 显示名优先级：自扫码/配置中心存过昵称 > member 接口 > 泛称
+            var nick = '';
+            try { nick = getItem(rule.QUARK_NICK_KEY, '') || ''; } catch (e) { nick = ''; }
+            if (!nick) { nick = rule._qkNick || ''; }
+            if (!nick) { nick = '已登录'; }
+            var mt = (obj.data.member && obj.data.member.member_type) || obj.data.member_type || '';
+            var vipTxt = mt === 'SUPER_VIP' ? '超级会员' : (/VIP/.test(String(mt)) ? '会员' : '普通用户');
+            vod.vod_content = '当前登录：' + nick + '（' + vipTxt + '）'
+                + '\n\n登录态来源：' + (src === 'cfg' ? '配置中心共享 —— 在「配置中心」源里也能看到这份登录' : (src === 'own' ? '本源扫码' : '未知'))
+                + '\n\n点「退出登录」仅停用本源的夸克功能（不影响趣盘等其它源）；配置中心重新扫码后点「重新检测」即可恢复。';
             vod.vod_play_url = '退出登录$qqklogout';
+            if (src === 'cfg' || !src) {
+                vod.vod_play_url = '重新检测配置中心登录$qkredetect#退出登录$qqklogout';
+            }
         } else {
-            vod.vod_content = '登录态已失效（cookie 过期），请回列表重新扫码。';
-            vod.vod_play_url = '清除失效登录$qqklogout';
+            vod.vod_content = '登录态已失效（cookie 过期）。\n\n两个恢复办法：\n① 若你在「配置中心」源里登录过夸克，点「重新检测」直接共享它的登录态；\n② 回列表重新扫码。';
+            vod.vod_play_url = '重新检测配置中心登录$qkredetect#清除失效登录$qqklogout';
         }
         vod.vod_blurb = vod.vod_content.substring(0, 100);
         return vod;
@@ -680,17 +785,24 @@ rule.qkCleanup = function (ck) {
 
 // 播放：stoken → 找/建临时目录 → save → task 等完成 → v2/play 直链
 // 完整流程失败时返回错误提示对象（不嗅探、不挂起）
+// 登录失效时自动强刷配置中心 cookie 重试一轮（配置中心那边可能刚重新扫过码）
 rule.wpQuarkPlay = function (b64payload) {
+    // force=true：跳过会话缓存直接读配置中心文件（播放是低频操作，值得强刷一次）
+    var ck = rule.qkCookie(true);
+    if (!ck) { return { parse: 0, url: '网盘搜索·夸克:未登录，请进「扫码登录」分类重新扫码', js: '' }; }
+    return rule.wpQuarkPlayInner(b64payload, ck, false);
+};
+rule.wpQuarkPlayInner = function (b64payload, ck, isRetry) {
     var fail = function (msg, needRelogin) {
         if (needRelogin) {
             try { setItem(rule.QUARK_CK_KEY, ''); } catch (e) { }
             rule._qkCk = '';
+            // 配置中心缓存一并失效（cookie 可能被配置中心刷新过，下次强刷重读）
+            rule._qkCfgCache = null;
         }
         return { parse: 0, url: '网盘搜索·夸克:' + msg, js: '' };
     };
     try {
-        var ck = rule.qkCookie();
-        if (!ck) { return fail('未登录，请进「扫码登录」分类重新扫码', true); }
         var pay = null;
         try { pay = JSON.parse(rule.b64d(String(b64payload))); } catch (e) { pay = null; }
         if (!pay || !pay.f) { return fail('无效的播放参数'); }
@@ -708,7 +820,15 @@ rule.wpQuarkPlay = function (b64payload) {
             var sobj = null;
             try { sobj = JSON.parse(sraw); } catch (e) { sobj = null; }
             if (sobj && !rule.qkOk(sobj) && (sobj.status === 401 || /login|auth/i.test(String(sobj.message || '')))) {
-                return fail('登录已失效，请重新扫码', true);
+                // 登录失效 → 先强刷配置中心拿新 cookie 重试一轮，还不行才报重新扫码
+                if (!isRetry && !(rule._qkIgnoreCfg || false)) {
+                    // 旧 cookie 已被证明失效：清掉自有存储，让后续取值自然落到配置中心
+                    try { setItem(rule.QUARK_CK_KEY, ''); } catch (e) { }
+                    rule._qkCk = '';
+                    var ck2 = rule.qkCfgCenterCookie(true);
+                    if (ck2) { return rule.wpQuarkPlayInner(b64payload, ck2, true); }
+                }
+                return fail('登录已失效，请重新扫码（或在配置中心重新登录后，进「扫码登录」分类重新检测）', true);
             }
             var slist = (sobj && sobj.data && sobj.data.list) || [];
             for (var i = 0; i < slist.length; i++) {

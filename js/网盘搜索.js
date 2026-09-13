@@ -1,18 +1,22 @@
 /**
  * 网盘搜索 drpy 源（后端 = PanSou 盘搜聚合 API）
  * 站点：PanSou（开源项目 fish2018/pansou），本规则对接公共实例 https://so.252035.xyz
- *       —— 自建后只改 rule.wpApi 一处即可（见文件末尾配置区）
+ *       —— 自建后只改 rule.wpApiList 即可（见配置区）
  *
  * 本源定位：把 PanSou 的「网盘资源聚合搜索」搬进 TVBox。
  *   搜索关键词 → 返回网盘资源卡片（夸克/百度/阿里/迅雷/UC/115/123/天翼/移动/磁力）
  *   点进详情 → 按网盘类型分线路，列出该资源的全部分享链接（含提取码）
  *
- * ⚠️ 重要限制（务必知晓）：
- *   网盘分享链接是网页地址，**不能直接当视频流播放**。本源 lazy 默认 parse:1
+ * ✅ 夸克直链播放（2026-09-13 新增，链路逆向自 spider.jar 的 QuarkPan 类）：
+ *   进「扫码登录」分类 → 用手机夸克 App 扫码（与趣盘等 Java 源同款交互）
+ *   → 登录后夸克资源多出「夸克直链」线路：点开即播（自动转存到网盘临时目录
+ *   → 调官方 API 取视频直链 → 播放后清理转存文件），与趣盘体验一致。
+ *   cookie 通过引擎 setItem 持久化（手机端存本地；zyfun 端会话级，重启后需重扫）。
+ *
+ * ⚠️ 未登录 / 非夸克资源的限制（务必知晓）：
+ *   网盘分享链接是网页地址，**不能直接当视频流播放**。普通线路 lazy 默认 parse:1
  *   （交给播放器嗅探/解析接口），能否播放取决于你端上是否配了网盘解析服务。
  *   若没配，请把 rule.wpPlayMode 改成 0，此时链接会原样交给播放器（可长按复制）。
- *   想要「点开即播」必须做网盘转存+直链解析（需要你自己的网盘账号 token），
- *   那是另一个量级的工程，不在本源范围内。
  *
  * 接口速查（PanSou）：
  *   - 搜索：GET {api}/api/search?kw={关键词}[&channels=频道1,频道2]
@@ -60,9 +64,10 @@ var rule = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
     },
     timeout: 10000,
-    // 一级 = 热门搜索词入口（PanSou 没有分类/榜单接口，只能靠预设词给出可点内容）
-    class_name: '庆余年&繁花&狂飙&三体&甄嬛传&漫威&动漫&综艺&纪录片&4K&蓝光&合集',
-    class_url: '1&2&3&4&5&6&7&8&9&10&11&12',
+    // 一级 = 热门搜索词入口 + 扫码登录（PanSou 没有分类/榜单接口，只能靠预设词给出可点内容）
+    // 「扫码登录」是功能入口：点开展示夸克扫码卡片，App 扫码确认后再点一次即登录
+    class_name: '扫码登录&庆余年&繁花&狂飙&三体&甄嬛传&漫威&动漫&综艺&纪录片&4K&蓝光&合集',
+    class_url: 'login&1&2&3&4&5&6&7&8&9&10&11&12',
     play_parse: true,
     play_json: [],
     推荐: $js.toString(() => {
@@ -82,13 +87,19 @@ var rule = {
         VODS = out;
     }),
     一级: $js.toString(() => {
-        // MY_CATE 是 class_url 的下标（1 起），映射回热词
-        var idx = parseInt(String(MY_CATE).replace(/[^0-9]/g, ''), 10);
-        var hot = rule.wpHot || [];
-        var kw = hot[idx - 1] || '合集';
-        // 一次拿满缓存上限，再按页切片：翻页共用同一份缓存，不再重复请求网络；
-        // 翻过头返回 [] → 端上自然停止翻页（防无限下拉请求）
-        VODS = rule.wpPage(rule.wpSearch(kw, rule.wpCacheLimit || 250), MY_PAGE, rule.wpPageSize);
+        // 功能入口：扫码登录夸克（登录后夸克/UC 资源可点开即播）
+        if (String(MY_CATE) === 'login') {
+            VODS = rule.wpLoginList(MY_PAGE);
+            // 顶层 return 非法（引擎 eval 不包函数）—— 用 else 包住主逻辑
+        } else {
+            // MY_CATE 是 class_url 的下标（1 起），映射回热词
+            var idx = parseInt(String(MY_CATE).replace(/[^0-9]/g, ''), 10);
+            var hot = rule.wpHot || [];
+            var kw = hot[idx - 1] || '合集';
+            // 一次拿满缓存上限，再按页切片：翻页共用同一份缓存，不再重复请求网络；
+            // 翻过头返回 [] → 端上自然停止翻页（防无限下拉请求）
+            VODS = rule.wpPage(rule.wpSearch(kw, rule.wpCacheLimit || 250), MY_PAGE, rule.wpPageSize);
+        }
     }),
     二级: $js.toString(() => {
         // vodObj 先给全字段默认值：坏 id / 解码失败时也不会返回 undefined
@@ -108,42 +119,65 @@ var rule = {
             vod_play_url: ''
         };
         try {
-            var data = rule.wpDecode(orId);
-            if (data) {
-                var note = String(data.n || '');
-                var links = data.l || [];
-                vodObj.vod_name = note;
-                vodObj.vod_pic = data.p || '';
-                vodObj.vod_remarks = links.length + ' 条链接';
-                // 按网盘类型分线路：同类型下的多条分享作为「多集」，集数标签用「第01集」
-                // 样式（和其它网盘源一致，用户好识别）；有提取码的标进 remark 由端上展示
-                var byType = {};
-                var typeOrder = [];
-                links.forEach(function (lk) {
-                    var t = String(lk[0] || 'other');
-                    var u = String(lk[1] || '');
-                    var pw = String(lk[2] || '');
-                    if (!u) { return; }
-                    if (!byType[t]) { byType[t] = []; typeOrder.push(t); }
-                    var no = byType[t].length + 1;
-                    // 「第01集」与其它网盘源的展示一致；若带提取码补在后半段，不破坏 name 部分
-                    var nm = '第' + (no < 10 ? '0' + no : no) + '集';
-                    byType[t].push(nm + '$' + u + (pw ? '@@' + pw : ''));
-                });
-                var froms = [];
-                var urls = [];
-                typeOrder.forEach(function (t) {
-                    froms.push(rule.wpTypeName[t] || t);
-                    urls.push(byType[t].join('#'));
-                });
-                vodObj.vod_play_from = froms.join('$$$');
-                vodObj.vod_play_url = urls.join('$$$');
-                var desc = note + '\n\n共 ' + links.length + ' 条网盘链接，覆盖：'
-                    + froms.join('、') + '。'
-                    + '\n提示：「第01集/第02集」是同一资源在不同网盘/不同账号的分享链接，并非剧集序号；带提取码的已附在链接里。'
-                    + '\n点下方线路打开对应分享页（网盘链接需在网盘 App / 网页中打开并转存，不能直接播放）。';
-                vodObj.vod_content = desc;
-                vodObj.vod_blurb = desc.substring(0, 100);
+            // 登录入口卡片 → 登录流程二级
+            if (String(orId).indexOf('http://wp/login') === 0) {
+                VOD = rule.wpLoginDetail(String(orId));
+                // 顶层 return 非法——用 if/else 结构
+            } else {
+                var data = rule.wpDecode(orId);
+                if (data) {
+                    var note = String(data.n || '');
+                    var links = data.l || [];
+                    vodObj.vod_name = note;
+                    vodObj.vod_pic = data.p || '';
+                    vodObj.vod_remarks = links.length + ' 条链接';
+                    // 已登录夸克 → 夸克/UC 分享直接列出真实文件（点开即播），
+                    // 其它网盘保持「链接列表 + 嗅探/复制」模式
+                    var froms = [];
+                    var urls = [];
+                    var played = false; // 夸克直链线路是否已生成
+                    if (rule.wpQuarkLoginState()) {
+                        var quarkLine = rule.wpQuarkDetailLine(links);
+                        if (quarkLine) {
+                            froms.push('夸克直链');
+                            urls.push(quarkLine);
+                            played = true;
+                        }
+                    }
+                    // 剩下的（未直链化的）链接按网盘类型分线路，条目标签「第01集」样式
+                    var byType = {};
+                    var typeOrder = [];
+                    links.forEach(function (lk) {
+                        var t = String(lk[0] || 'other');
+                        var u = String(lk[1] || '');
+                        var pw = String(lk[2] || '');
+                        if (!u) { return; }
+                        // 夸克直链已生成的就不再进普通线路（同一批夸克链接）
+                        if (played && (t === 'quark' || t === 'uc')) { return; }
+                        if (!byType[t]) { byType[t] = []; typeOrder.push(t); }
+                        var no = byType[t].length + 1;
+                        // 「第01集」与其它网盘源的展示一致；提取码用「@@」随链接传给 lazy
+                        var nm = '第' + (no < 10 ? '0' + no : no) + '集';
+                        byType[t].push(nm + '$' + u + (pw ? '@@' + pw : ''));
+                    });
+                    typeOrder.forEach(function (t) {
+                        froms.push(rule.wpTypeName[t] || t);
+                        urls.push(byType[t].join('#'));
+                    });
+                    vodObj.vod_play_from = froms.join('$$$');
+                    vodObj.vod_play_url = urls.join('$$$');
+                    var desc = note + '\n\n共 ' + links.length + ' 条网盘链接，覆盖：'
+                        + froms.join('、') + '。';
+                    if (played) {
+                        desc += '\n✅ 已登录夸克：「夸克直链」线路可直接播放（首次点击需转存，约 2~5 秒）。';
+                    } else {
+                        desc += '\n提示：「第01集/第02集」是同一资源在不同网盘/不同账号的分享链接，并非剧集序号。'
+                            + '\n点下方线路打开对应分享页（网盘链接需在网盘 App / 网页中打开并转存，不能直接播放）。'
+                            + '\n想直接播放？进分类「扫码登录」用夸克 App 扫码，之后夸克/UC 资源即可点开即播。';
+                    }
+                    vodObj.vod_content = desc;
+                    vodObj.vod_blurb = desc.substring(0, 100);
+                }
             }
         } catch (e) { }
         VOD = vodObj;
@@ -154,25 +188,35 @@ var rule = {
         VODS = kw ? rule.wpPage(rule.wpSearch(kw, rule.wpCacheLimit || 250), MY_PAGE, rule.wpPageSize) : [];
     }),
     lazy: $js.toString(() => {
-        // 网盘分享链接 / 磁力链接都不能直出视频流，默认交解析器嗅探（见文件头限制说明）
-        // 集名后缀「@@提取码」：分享码不能丢，随链接传到这里，展示给用户同时不进 URL
+        // 三类输入：夸克直链（qk://）、退出登录操作（qqklogout）、普通分享链接
         try {
-            var raw = String(input).trim();
-            // 「url@@提取码」格式：码只用于展示，剥离后再交给播放器
-            var parts = raw.split('@@');
-            var u = parts[0];
-            var pw = parts.length > 1 ? String(parts[1] || '') : '';
-            var mode = rule.wpPlayMode;
-            if (/^magnet:/i.test(u)) {
-                input = { parse: mode, url: u, js: '' };
-            } else if (/^https?:\/\//i.test(u)) {
-                // 有提取码且 URL 里还没带上（PanSou 部分数据 URL 自带 ?pwd=xxx，别重复追加）
-                var finalUrl = (pw && u.indexOf(pw) < 0)
-                    ? (u + (u.indexOf('?') >= 0 ? '&' : '?') + 'pwd=' + encodeURIComponent(pw))
-                    : u;
-                input = { parse: mode, url: finalUrl, headers: rule.headers };
+            var rawIn = String(input).trim();
+            if (rawIn === 'qqklogout') {
+                // 退出登录：清存储与内存
+                try { setItem(rule.QUARK_CK_KEY, ''); } catch (e) { }
+                rule._qkCk = '';
+                input = { parse: 0, url: '已退出登录，回列表重新扫码即可再次登录', js: '' };
+            } else if (rawIn.indexOf('qk://') === 0) {
+                // 夸克直链剧集：转存 → 取直链 → 直接播放（不嗅探）
+                input = rule.wpQuarkPlay(rawIn.slice(5));
             } else {
-                input = { parse: 0, url: '网盘搜索:无效链接', js: '' };
+                // 普通网盘分享链接 / 磁力：不能直出视频流，默认交解析器嗅探
+                // 集名后缀「@@提取码」：分享码不能丢，随链接传到这里，展示给用户同时不进 URL
+                var parts = rawIn.split('@@');
+                var u = parts[0];
+                var pw = parts.length > 1 ? String(parts[1] || '') : '';
+                var mode = rule.wpPlayMode;
+                if (/^magnet:/i.test(u)) {
+                    input = { parse: mode, url: u, js: '' };
+                } else if (/^https?:\/\//i.test(u)) {
+                    // 有提取码且 URL 里还没带上（PanSou 部分数据 URL 自带 ?pwd=xxx，别重复追加）
+                    var finalUrl = (pw && u.indexOf(pw) < 0)
+                        ? (u + (u.indexOf('?') >= 0 ? '&' : '?') + 'pwd=' + encodeURIComponent(pw))
+                        : u;
+                    input = { parse: mode, url: finalUrl, headers: rule.headers };
+                } else {
+                    input = { parse: 0, url: '网盘搜索:无效链接', js: '' };
+                }
             }
         } catch (e) {
             input = { parse: 0, url: '网盘搜索:' + e.message, js: '' };
@@ -260,6 +304,491 @@ rule.wpNameMax = 80;
 // 噪音过滤：TG 频道每日「更新目录」类帖子，命中即丢弃（不是具体资源）
 // 存字符串而非 RegExp —— rule 对象可能被引擎序列化传给 worker，RegExp 会退化成 {} 导致 .test 抛错
 rule.wpSkipRe = '更新目录|资源目录|目录汇总|今日更新|每日更新|更新汇总|^#+\\s*$';
+
+/* ============================ 夸克网盘登录 + 转存直链（仿 QuarkPan） ============================
+ * 链路（2026-09-13 从 spider.jar 的 QuarkPan/QuarkYun 类逆向 + 开源项目对照确认）：
+ *   登录（无需账号密码，手机夸克 App 扫码）：
+ *     ① POST uop.quark.cn/cas/ajax/getTokenForQrcodeLogin?client_id=532&v=1.2 → token
+ *     ② 二维码内容 = https://su.quark.cn/4_eMHBJ?token={token}（用户用夸克 App 扫）
+ *     ③ 轮询 GET uop.quark.cn/cas/ajax/getServiceTicketByQrcodeToken?...&token={token}
+ *        status 50004001=未扫 / 50004002=已扫未确认 / 2000000=已确认(带 service_ticket)
+ *     ④ GET pan.quark.cn/account/info?fr=pc&platform=pc&st={service_ticket}
+ *        响应 Set-Cookie 里的 __pus / __puus 即登录态 cookie
+ *   转存直链（播放时）：
+ *     ① POST drive-pc.quark.cn/1/clouddrive/share/sharepage/token {pwd_id, passcode} → stoken（免登录）
+ *     ② GET  share/sharepage/detail?pwd_id=&stoken=&pdir_fid=0&_page=1&_size=50 → 文件列表 fid + share_fid_token
+ *     ③ POST share/sharepage/save {fid_list, fid_token_list, to_pdir_fid, pwd_id, stoken, pdir_fid:0, scene:'link'}
+ *        → task_id（转存到自己网盘根目录的临时文件夹）
+ *     ④ GET  task?task_id= 轮询 → 完成
+ *     ⑤ GET  file/v2/play?fid= → video_list[].url 直链（mp4/m3u8）
+ *     ⑥ file/delete 清理转存的临时文件（看完删，不占用户网盘空间）
+ * cookie 用引擎 setItem/getItem 持久化（zyfun 端是会话级内存，手机端持久化到本地）
+ */
+
+// 夸克登录 cookie 的存储键
+rule.QUARK_CK_KEY = 'wp_quark_cookie';
+// 转存临时目录名（用户网盘里可见；每次播放前清理旧的）
+rule.qkTmpDir = 'TVBox播放缓存';
+
+// 夸克 API 通用参数（逆向 jar 与开源实现一致）
+rule.qkParam = function () {
+    return 'pr=ucpro&fr=pc&uc_param_str=&__dt=' + (rule.wpNow() % 1000) + '&__t=' + rule.wpNow();
+};
+// 夸克 API 请求头（必须带登录 cookie + Referer）
+rule.qkHeaders = function (ck) {
+    var h = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+        'Content-Type': 'application/json',
+        'Referer': 'https://pan.quark.cn/',
+        'Origin': 'https://pan.quark.cn'
+    };
+    if (ck) { h['Cookie'] = ck; }
+    return h;
+};
+
+// 登录态 cookie（优先存储，其次内存）
+rule.qkCookie = function () {
+    var ck = '';
+    try { ck = getItem(rule.QUARK_CK_KEY, '') || ''; } catch (e) { ck = ''; }
+    if (!ck) { ck = rule._qkCk || ''; }
+    return ck;
+};
+rule.qkSetCookie = function (ck) {
+    rule._qkCk = ck;
+    try { setItem(rule.QUARK_CK_KEY, ck); } catch (e) { }
+};
+// 已登录？（有 cookie 即视为已登录；失效会在播放时报错并自动清掉）
+rule.wpQuarkLoginState = function () {
+    return !!rule.qkCookie();
+};
+
+/* ---------- 登录流程 ---------- */
+
+// 生成新二维码：返回 {token, qrUrl}（qrUrl 是要编码进二维码的内容）
+rule.qkQrNew = function () {
+    var raw = request('https://uop.quark.cn/cas/ajax/getTokenForQrcodeLogin?client_id=532&v=1.2', {
+        method: 'POST',
+        headers: rule.qkHeaders(),
+        withHeaders: false,
+        timeout: 10000
+    });
+    var obj = null;
+    try { obj = JSON.parse(raw); } catch (e) { obj = null; }
+    if (!obj || obj.status !== 2000000 || !obj.data || !obj.data.members) { return null; }
+    var token = String(obj.data.members.token || '');
+    if (!token) { return null; }
+    return { token: token, qrUrl: 'https://su.quark.cn/4_eMHBJ?token=' + token };
+};
+
+// 轮询扫码状态：未扫/已扫待确认返回 null，确认成功写 cookie 返回 true，失败/过期返回 'expired'
+rule.qkQrPoll = function (token) {
+    var raw = request('https://uop.quark.cn/cas/ajax/getServiceTicketByQrcodeToken?client_id=532&v=1.2&token=' + encodeURIComponent(token), {
+        headers: rule.qkHeaders(),
+        timeout: 8000
+    });
+    var obj = null;
+    try { obj = JSON.parse(raw); } catch (e) { obj = null; }
+    if (!obj) { return null; }
+    if (obj.status === 50004001 || obj.status === 50004002) { return null; } // 未扫 / 已扫未确认
+    if (obj.status === 2000000) {
+        var st = obj.data && obj.data.members && obj.data.members.service_ticket;
+        if (!st) { return null; }
+        // st 换正式登录 cookie：account/info 的响应头里 Set-Cookie 就是登录态
+        var hraw = request('https://pan.quark.cn/account/info?fr=pc&platform=pc&st=' + encodeURIComponent(st), {
+            headers: rule.qkHeaders(),
+            withHeaders: true,
+            timeout: 10000
+        });
+        var hj = null;
+        try { hj = JSON.parse(hraw); } catch (e) { hj = null; }
+        if (hj) {
+            var setCk = '';
+            for (var k in hj) {
+                if (Object.prototype.hasOwnProperty.call(hj, k) && k.toLowerCase() === 'set-cookie') {
+                    var v = hj[k];
+                    setCk = Array.isArray(v) ? v.join('#@@#') : String(v);
+                }
+            }
+            // 取出 __pus / __puus 两条关键 cookie（登录态本体），别的跟踪 cookie 不要
+            var ck = '';
+            var m1 = setCk.match(/__pus=[^;#]+/);
+            var m2 = setCk.match(/__puus=[^;#]+/);
+            if (m1) { ck += m1[0]; }
+            if (m2) { ck += (ck ? '; ' : '') + m2[0]; }
+            if (ck) {
+                rule.qkSetCookie(ck);
+                return true;
+            }
+        }
+        return 'expired';
+    }
+    return 'expired'; // 50004003 二维码已失效等
+};
+
+// 一级「扫码登录」分类的列表
+rule.wpLoginList = function (page) {
+    if (String(page).replace(/[^0-9]/g, '') !== '1') { return []; }
+    if (rule.wpQuarkLoginState()) {
+        // 已登录：展示状态卡片（进入二级可看账号信息/退出登录）
+        return [{
+            vod_id: 'http://wp/login/status',
+            vod_name: '夸克已登录 · 点击管理',
+            vod_pic: '',
+            vod_remarks: '正常',
+            vod_blurb: '夸克已登录，夸克/UC 资源可点开即播（自动转存取直链）'
+        }];
+    }
+    // 未登录：生成新二维码
+    var qr = rule.qkQrNew();
+    if (!qr) {
+        return [{
+            vod_id: 'http://wp/login/err',
+            vod_name: '获取二维码失败，点此重试',
+            vod_pic: '',
+            vod_remarks: '点击刷新',
+            vod_blurb: '连接夸克登录服务失败，点击重试'
+        }];
+    }
+    // token 存内存（本会话有效）；二维码图片走公共 QR 生成服务（国内直连实测 1.2s）
+    rule._qkToken = qr.token;
+    var img = 'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(qr.qrUrl);
+    return [{
+        vod_id: 'http://wp/login/qr',
+        vod_name: '用【夸克App】扫码登录',
+        vod_pic: img,
+        vod_remarks: '扫码后回来点这张卡',
+        vod_blurb: '打开手机夸克 App → 首页右上角扫一扫 → 对准二维码 → 确认登录'
+    }];
+};
+
+// 登录流程的二级
+rule.wpLoginDetail = function (id) {
+    if (id === 'http://wp/login/status') {
+        // 管理页：确认 cookie 有效性 + 退出登录入口
+        var vod = {
+            vod_id: id,
+            vod_name: '夸克登录管理',
+            vod_pic: '',
+            type_name: '功能',
+            vod_content: '',
+            vod_play_from: '操作',
+            vod_play_url: ''
+        };
+        // 用 member 接口验证 cookie 是否还有效
+        var ck = rule.qkCookie();
+        var raw = request('https://drive-pc.quark.cn/1/clouddrive/member?pr=ucpro&fr=pc&uc_param_str=&fetch_subscribe=true&_ch=home&fetch_identity=true', {
+            headers: rule.qkHeaders(ck),
+            timeout: 10000
+        });
+        var obj = null;
+        try { obj = JSON.parse(raw); } catch (e) { obj = null; }
+        var member = (obj && obj.data && obj.data.member) ? obj.data.member : null;
+        if (member) {
+            vod.vod_content = '当前登录：' + String(member.nick_name || member.display_name || '已登录')
+                + '（' + (member.is_vip ? '会员' : '普通用户') + '）'
+                + '\n\n点「退出登录」清除本机保存的夸克登录态。';
+            vod.vod_play_url = '退出登录$qqklogout';
+        } else {
+            vod.vod_content = '登录态已失效（cookie 过期），请回列表重新扫码。';
+            vod.vod_play_url = '清除失效登录$qqklogout';
+        }
+        vod.vod_blurb = vod.vod_content.substring(0, 100);
+        return vod;
+    }
+    if (id === 'http://wp/login/err') {
+        // 获取失败 → 引导回一级列表重新拉二维码（一级列表本身就会重试）
+        return {
+            vod_id: id,
+            vod_name: '获取二维码失败',
+            vod_pic: '',
+            type_name: '功能',
+            vod_content: '连接夸克登录服务失败。\n按返回键回到列表刷新，会自动重新生成二维码。',
+            vod_blurb: '连接夸克登录服务失败',
+            vod_play_from: '提示',
+            vod_play_url: '返回刷新$qhttp://wp/login/err'
+        };
+    }
+    // 二维码卡片：轮询扫码状态
+    if (!rule._qkToken) {
+        return {
+            vod_id: id,
+            vod_name: '二维码已过期',
+            vod_pic: '',
+            type_name: '功能',
+            vod_content: '二维码已过期或本会话未生成。\n按返回键回到列表，重新进入「扫码登录」分类即可重新生成。',
+            vod_blurb: '二维码已过期',
+            vod_play_from: '提示',
+            vod_play_url: '返回重新生成$qhttp://wp/login/qr'
+        };
+    }
+    var st = rule.qkQrPoll(rule._qkToken);
+    if (st === true) {
+        return {
+            vod_id: id,
+            vod_name: '登录成功',
+            vod_pic: '',
+            type_name: '功能',
+            vod_content: '✅ 夸克登录成功！\n\n现在搜索任意资源，夸克/UC 网盘的条目会多出「夸克直链」线路，点开即播（首次点击需转存，约 2~5 秒）。\n回列表搜个「庆余年」试试。',
+            vod_blurb: '夸克登录成功',
+            vod_play_from: '提示',
+            vod_play_url: '返回开始使用$qhttp://wp/login/qr'
+        };
+    }
+    if (st === 'expired') {
+        rule._qkToken = '';
+        return {
+            vod_id: id,
+            vod_name: '二维码已失效',
+            vod_pic: '',
+            type_name: '功能',
+            vod_content: '二维码超时未确认。\n按返回键回到列表重新进入，会生成新二维码。',
+            vod_blurb: '二维码超时',
+            vod_play_from: '提示',
+            vod_play_url: '返回重新生成$qhttp://wp/login/qr'
+        };
+    }
+    // 还没扫/没确认：明确提示继续等
+    return {
+        vod_id: id,
+        vod_name: '等待扫码确认中',
+        vod_pic: '',
+        type_name: '功能',
+        vod_content: '未检测到扫码。\n\n操作：打开手机夸克 App → 首页右上角「+」→ 扫一扫 → 对准列表页那张二维码 → 手机上点「确认登录」。\n\n手机确认后，回到这里重新点这张卡片即可完成登录。',
+        vod_blurb: '等待手机确认',
+        vod_play_from: '提示',
+        vod_play_url: '点我重新检测$qhttp://wp/login/qr'
+    };
+};
+
+/* ---------- 转存直链（播放） ---------- */
+
+// 分享链接 → {pwd_id, passcode}
+rule.qkParseShare = function (u) {
+    var m = String(u).match(/pan\.quark\.cn\/s\/([a-zA-Z0-9]+)(?:\?pwd=([a-zA-Z0-9]+))?/);
+    if (!m) { return null; }
+    return { pwd_id: m[1], passcode: m[2] || '' };
+};
+
+// 夸克 API 状态码判定：drive-pc 域实际返回 200（实测 2026-09-13），
+// 开源项目里写的 2000000 是 uop 登录域格式——两种都认，稳妥
+rule.qkOk = function (obj) {
+    return !!(obj && (obj.status === 200 || obj.status === 2000000 || obj.status === 0));
+};
+
+// 分享 stoken（免登录接口）
+rule.qkStoken = function (share) {
+    var raw = request('https://drive-pc.quark.cn/1/clouddrive/share/sharepage/token?' + rule.qkParam(), {
+        method: 'POST',
+        headers: rule.qkHeaders(),
+        body: JSON.stringify({ pwd_id: share.pwd_id, passcode: share.passcode }),
+        timeout: 10000
+    });
+    var obj = null;
+    try { obj = JSON.parse(raw); } catch (e) { obj = null; }
+    if (rule.qkOk(obj) && obj.data && obj.data.stoken) { return obj.data.stoken; }
+    return '';
+};
+
+// 分享文件列表（page 1 最多 50；分享根若是一个大文件夹则自动钻一层）
+rule.qkShareDetail = function (share, stoken) {
+    var base = 'https://drive-pc.quark.cn/1/clouddrive/share/sharepage/detail?';
+    var qs = 'pr=ucpro&fr=pc&pwd_id=' + encodeURIComponent(share.pwd_id)
+        + '&stoken=' + encodeURIComponent(stoken)
+        + '&pdir_fid=0&_page=1&_size=50&_fetch_total=1&_fetch_banner=0&_fetch_share=1&_fetch_sub_dirs=0'
+        + '&_sort=file_type:asc,file_name:asc';
+    var raw = request(base + qs, { headers: rule.qkHeaders(), timeout: 12000 });
+    var obj = null;
+    try { obj = JSON.parse(raw); } catch (e) { obj = null; }
+    var list = (rule.qkOk(obj) && obj.data && obj.data.list) ? obj.data.list : [];
+    // 分享根就是一个文件夹（list 只有 1 项且是 dir）→ 钻进去拿真实文件
+    if (list.length === 1 && list[0].dir) {
+        var qs2 = 'pr=ucpro&fr=pc&pwd_id=' + encodeURIComponent(share.pwd_id)
+            + '&stoken=' + encodeURIComponent(stoken)
+            + '&pdir_fid=' + encodeURIComponent(list[0].fid) + '&_page=1&_size=100&_fetch_total=1&_fetch_banner=0&_fetch_share=1&_fetch_sub_dirs=0'
+            + '&_sort=file_type:asc,file_name:asc';
+        var raw2 = request(base + qs2, { headers: rule.qkHeaders(), timeout: 12000 });
+        var obj2 = null;
+        try { obj2 = JSON.parse(raw2); } catch (e) { obj2 = null; }
+        var list2 = (rule.qkOk(obj2) && obj2.data && obj2.data.list) ? obj2.data.list : [];
+        if (list2.length) { return list2; }
+    }
+    return list;
+};
+
+// 二级：把夸克/UC 分享变成「真实文件列表」线路
+// 返回 '文件名$qk://{json}' 用 # 连接的串；失败/无文件返回 null（回退普通线路）
+rule.wpQuarkDetailLine = function (links) {
+    try {
+        var ck = rule.qkCookie();
+        if (!ck) { return null; }
+        // 找第一个夸克分享（UC 链接 host 不同不能走夸克 API，只有 pan.quark.cn 的能直链化）
+        var share = null;
+        var shareUrl = '';
+        for (var i = 0; i < links.length; i++) {
+            var lk = links[i] || [];
+            if (String(lk[0]) === 'quark' && /pan\.quark\.cn\/s\//.test(String(lk[1] || ''))) {
+                share = rule.qkParseShare(lk[1]);
+                if (share) { shareUrl = lk[1]; break; }
+            }
+        }
+        if (!share) { return null; }
+        var stoken = rule.qkStoken(share);
+        if (!stoken) { return null; }
+        var files = rule.qkShareDetail(share, stoken);
+        if (!files.length) { return null; }
+        // 只要视频文件（file_type 1=文件；视频按后缀过滤），跳过文件夹和海报图
+        var eps = [];
+        files.forEach(function (f) {
+            var nm = String(f.file_name || '');
+            var fid = String(f.fid || '');
+            var ftok = String(f.share_fid_token || '');
+            if (!fid || !ftok) { return; }
+            if (!/\.(mp4|mkv|ts|avi|mov|flv|rmvb|wmv|iso|mpg|webm|m3u8)$/i.test(nm)) { return; }
+            // 临时标记：pwd_id/stoken/fid/fid_token 全部带上，lazy 直接取用不重复请求
+            var payload = { p: share.pwd_id, s: stoken, f: fid, t: ftok };
+            eps.push(nm + '$qk://' + rule.b64e(JSON.stringify(payload)));
+        });
+        if (!eps.length) { return null; }
+        return eps.join('#');
+    } catch (e) { return null; }
+};
+
+// 清理转存临时目录（播放完删，不占用户网盘空间）
+rule.qkCleanup = function (ck) {
+    try {
+        // 根目录里找 TVBox播放缓存 目录
+        var raw = request('https://drive-pc.quark.cn/1/clouddrive/file/sort?' + rule.qkParam()
+            + '&pdir_fid=0&_page=1&_size=50&_fetch_total=1&_fetch_sub_dirs=0&_sort=file_type:asc,updated_at:desc', {
+            headers: rule.qkHeaders(ck),
+            timeout: 10000
+        });
+        var obj = null;
+        try { obj = JSON.parse(raw); } catch (e) { obj = null; }
+        var list = (obj && obj.data && obj.data.list) || [];
+        for (var i = 0; i < list.length; i++) {
+            if (String(list[i].file_name) === rule.qkTmpDir && list[i].dir) {
+                request('https://drive-pc.quark.cn/1/clouddrive/file/delete?' + rule.qkParam(), {
+                    method: 'POST',
+                    headers: rule.qkHeaders(ck),
+                    body: JSON.stringify({ action_type: 2, filelist: [list[i].fid], exclude_fids: [] }),
+                    timeout: 10000
+                });
+            }
+        }
+    } catch (e) { }
+};
+
+// 播放：stoken → 找/建临时目录 → save → task 等完成 → v2/play 直链
+// 完整流程失败时返回错误提示对象（不嗅探、不挂起）
+rule.wpQuarkPlay = function (b64payload) {
+    var fail = function (msg, needRelogin) {
+        if (needRelogin) {
+            try { setItem(rule.QUARK_CK_KEY, ''); } catch (e) { }
+            rule._qkCk = '';
+        }
+        return { parse: 0, url: '网盘搜索·夸克:' + msg, js: '' };
+    };
+    try {
+        var ck = rule.qkCookie();
+        if (!ck) { return fail('未登录，请进「扫码登录」分类重新扫码', true); }
+        var pay = null;
+        try { pay = JSON.parse(rule.b64d(String(b64payload))); } catch (e) { pay = null; }
+        if (!pay || !pay.f) { return fail('无效的播放参数'); }
+        var stoken = pay.s || rule.qkStoken({ pwd_id: pay.p, passcode: '' });
+        if (!stoken) { return fail('分享已失效（stoken 获取失败）'); }
+
+        // 1) 找根目录下已有的临时目录 fid（没有就转存到根目录，播放完统一清理）
+        var dirFid = '0';
+        try {
+            var sraw = request('https://drive-pc.quark.cn/1/clouddrive/file/sort?' + rule.qkParam()
+                + '&pdir_fid=0&_page=1&_size=50&_fetch_total=1&_fetch_sub_dirs=0&_sort=file_type:asc,updated_at:desc', {
+                headers: rule.qkHeaders(ck),
+                timeout: 10000
+            });
+            var sobj = null;
+            try { sobj = JSON.parse(sraw); } catch (e) { sobj = null; }
+            if (sobj && !rule.qkOk(sobj) && (sobj.status === 401 || /login|auth/i.test(String(sobj.message || '')))) {
+                return fail('登录已失效，请重新扫码', true);
+            }
+            var slist = (sobj && sobj.data && sobj.data.list) || [];
+            for (var i = 0; i < slist.length; i++) {
+                if (String(slist[i].file_name) === rule.qkTmpDir && slist[i].dir) { dirFid = String(slist[i].fid); break; }
+            }
+        } catch (e) { }
+
+        // 2) 转存
+        var saveRaw = request('https://drive-pc.quark.cn/1/clouddrive/share/sharepage/save?' + rule.qkParam(), {
+            method: 'POST',
+            headers: rule.qkHeaders(ck),
+            body: JSON.stringify({
+                fid_list: [pay.f],
+                fid_token_list: [pay.t],
+                to_pdir_fid: dirFid,
+                pwd_id: pay.p,
+                stoken: stoken,
+                pdir_fid: '0',
+                scene: 'link'
+            }),
+            timeout: 15000
+        });
+        var saveObj = null;
+        try { saveObj = JSON.parse(saveRaw); } catch (e) { saveObj = null; }
+        if (!saveObj) { return fail('转存请求失败（网络）'); }
+        if (!rule.qkOk(saveObj)) {
+            // 常见错误：share expired / 文件已被转存（already）等
+            return fail(String(saveObj.message || '转存失败'));
+        }
+        // 同步完成：task_resp 里直接有 save_as；异步：轮询 task
+        var savedFid = '';
+        var sd = saveObj.data || {};
+        if (sd.task_resp && sd.task_resp.data && sd.task_resp.data.save_as && sd.task_resp.data.save_as.save_as_top_fids) {
+            savedFid = String(sd.task_resp.data.save_as.save_as_top_fids[0] || '');
+        } else if (sd.task_id) {
+            for (var t = 0; t < 3; t++) {
+                var traw = request('https://drive-pc.quark.cn/1/clouddrive/task?' + rule.qkParam() + '&task_id=' + encodeURIComponent(sd.task_id) + '&retry_index=' + t, {
+                    headers: rule.qkHeaders(ck),
+                    timeout: 10000
+                });
+                var tobj = null;
+                try { tobj = JSON.parse(traw); } catch (e) { tobj = null; }
+                if (tobj && tobj.data && tobj.data.save_as && tobj.data.save_as.save_as_top_fids) {
+                    savedFid = String(tobj.data.save_as.save_as_top_fids[0] || '');
+                    break;
+                }
+            }
+        }
+        if (!savedFid) { return fail('转存完成但未拿到文件 id'); }
+
+        // 3) 取直链
+        var praw = request('https://drive-pc.quark.cn/1/clouddrive/file/v2/play?' + rule.qkParam() + '&fid=' + encodeURIComponent(savedFid) + '&format=1', {
+            headers: rule.qkHeaders(ck),
+            timeout: 15000
+        });
+        var pobj = null;
+        try { pobj = JSON.parse(praw); } catch (e) { pobj = null; }
+        if (!pobj || !pobj.data) { return fail('取播放直链失败'); }
+        var vl = pobj.data.video_list || [];
+        // video_list 按清晰度从高到低；取第一个（最高清晰度）
+        var direct = '';
+        for (var vi = 0; vi < vl.length; vi++) {
+            var v = vl[vi] || {};
+            var u = String(v.video_url || v.url || '');
+            if (u) { direct = u; break; }
+        }
+        if (!direct) { return fail('无可用视频流（可能会员专属清晰度）'); }
+
+        // 4) 后台清理旧缓存（不等结果，下一次播放前也会清理）
+        rule.qkCleanup(ck);
+
+        return {
+            parse: 0,
+            url: direct,
+            js: ''
+        };
+    } catch (e) {
+        return fail('播放异常:' + (e.message || e));
+    }
+};
 
 /* ============================ 工具函数 ============================ */
 
